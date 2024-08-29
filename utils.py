@@ -1,6 +1,7 @@
 from scipy.signal import butter, filtfilt, sosfilt
 from scipy.signal import iirnotch
 
+
 def butter_bandpass(lowcut, highcut, fs, order=5):
     '''
 
@@ -26,6 +27,7 @@ def butter_bandpass_filter(data, lowcut, highcut, fs, order=5):
     sos = butter_bandpass(lowcut, highcut, fs, order=order)
     y = sosfilt(sos, data)
     return y
+
 
 def notch_filter(data, fs, freq, Q=30):
     '''
