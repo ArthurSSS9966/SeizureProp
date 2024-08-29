@@ -93,11 +93,12 @@ def constructDataset(data):
 
 
 DATA_FOLDER = "D:/Blcdata/seizure"
+OUTPUT_FOLDER = "data"
 PAT_NO = 65
 
 if __name__ == "__main__":
     # Load the data
-    data_folder = os.path.join(DATA_FOLDER, "P0{:02d}_test".format(PAT_NO))
+    data_folder = os.path.join(DATA_FOLDER, "P0{:02d}".format(PAT_NO))
 
     seizureData = []  # List to store the seizure data
 
@@ -115,7 +116,14 @@ if __name__ == "__main__":
 
     for data in seizureData:
         dataset = constructDataset(data)
+        output_dir = os.path.join(OUTPUT_FOLDER, f"P{PAT_NO}")
 
         # Save the data to a new file
-        with open(f"seizure_{dataset['seizureNumber']}.pkl", "wb") as f:
+        if not os.path.exists(output_dir):
+            print(f"Creating directory {output_dir}")
+            os.makedirs(output_dir)
+
+        output_file = os.path.join(output_dir, f"seizure_{dataset['seizureNumber']}.pkl")
+        with open(output_file, "wb") as f:
             pickle.dump(dataset, f)
+            print(f"Data for seizure {dataset['seizureNumber']} saved to {output_file}")

@@ -3,14 +3,17 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pickle
 from scipy.signal import welch
+import os
 
-DATA_FOLDER = "D:/Blcdata/seizure"
+
+DATA_FOLDER = "data"
 PAT_NO = 65
 
 
 if __name__ == "__main__":
     # Load the data
-    dataset = pickle.load(open("seizure_1.pkl", "rb"))
+    datafile = os.path.join(DATA_FOLDER, f"P{PAT_NO}", "seizure_1.pkl")
+    dataset = pickle.load(open(datafile, "rb"))
 
     eegData = dataset["eegData"]
     seizureNumber = dataset["seizureNumber"]

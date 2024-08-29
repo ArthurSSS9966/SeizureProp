@@ -1,8 +1,8 @@
-from scipy.signal import coherence, welch, csd
+from scipy.signal import welch, csd
 import numpy as np
 import matplotlib.pyplot as plt
 from statsmodels.tsa.stattools import grangercausalitytests
-from mne_connectivity import spectral_connectivity_epochs
+
 
 class ConnectivityCalculator:
     def __init__(self, data, fs):
