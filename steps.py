@@ -4,14 +4,17 @@ import matplotlib.pyplot as plt
 from utils import notch_filter, butter_bandpass_filter
 from scipy.signal import welch
 
+
 def init_examination(dataset, channelNumber, RESULT_FOLDER, start_time=-3, end_time=7):
     '''
-    Function to initialize the examination of the seizure data
-    :param dataset:
-    :param channelNumber:
-    :param RESULT_FOLDER:
-    :param start_time:
-    :param end_time:
+    Function to initialize the examination of the seizure data,
+    This will plot the raw data, filtered data, bipolar montage, filtered bipolar montage,
+    and power spectral density of the raw data, filtered data, and filtered bipolar montage
+    :param dataset: EEG dataset created by the datasetConstruct.py
+    :param channelNumber: The channel number to be examined
+    :param RESULT_FOLDER: The folder to save the results
+    :param start_time: The start time of the examination window
+    :param end_time: The end time of the examination window
     :return:
     '''
     eegData = dataset["eegData"]
