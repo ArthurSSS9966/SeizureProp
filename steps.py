@@ -10,20 +10,25 @@ def init_examination(dataset, channelNumber, RESULT_FOLDER, start_time=-3, end_t
     Function to initialize the examination of the seizure data,
     This will plot the raw data, filtered data, bipolar montage, filtered bipolar montage,
     and power spectral density of the raw data, filtered data, and filtered bipolar montage
-    :param dataset: EEG dataset created by the datasetConstruct.py
+    :param dataset: sEEG .edf data
     :param channelNumber: The channel number to be examined
     :param RESULT_FOLDER: The folder to save the results
     :param start_time: The start time of the examination window
     :param end_time: The end time of the examination window
     :return:
     '''
-    eegData = dataset["eegData"]
-    samplingRate = dataset["samplingRate"] * 2
-    timeIndex = dataset["normalized_times"]
-    seizureNumber = dataset["seizureNumber"]
+    eegData, timerange = dataset[:]
+    eegData = eegData.T * 1e6
+    samplingRate = int(dataset.info["sfreq"])
+    timeIndex = dataset.annotations.onset
+    seizureNumber = dataset.seizureNumber
+    channelName = dataset.ch_names[channelNumber]
 
-    # Get time index when normalized time is 0
-    timeStartIndex = np.where(timeIndex == 0)[0][0]
+    print(f"Seizure {seizureNumber} Channel {channelName} is being examined...")
+
+    # Find the index of timeIndex where it matches 'sz'
+    timeStartIndex = np.where(dataset.annotations.description == 'SZ')[0][0]
+    timeStartIndex = int(timeIndex[timeStartIndex] * samplingRate)
     timeStartIndex = int(timeStartIndex + start_time * samplingRate)
     timeEndIndex = int(timeStartIndex + end_time * samplingRate)
 
@@ -33,22 +38,22 @@ def init_examination(dataset, channelNumber, RESULT_FOLDER, start_time=-3, end_t
     timerange = np.linspace(start_time - 1, end_time - 1, len(channel1))
 
     plt.plot(timerange, channel1)
-    plt.vlines(0, -1000, 1000, color='r', linestyles='dashed', label='Seizure Start')
-    plt.title(f"Seizure {seizureNumber}_Channel 1 Raw")
+    plt.vlines(0, -400, 400, color='r', linestyles='dashed', label='Seizure Start')
+    plt.title(f"Seizure {seizureNumber}_Channel {channelName} Raw")
     plt.legend()
-    save_location = os.path.join(RESULT_FOLDER, f"seizure_{seizureNumber}_raw.svg")
+    save_location = os.path.join(RESULT_FOLDER, f"{channelName}seizure_{seizureNumber}_raw.svg")
     plt.savefig(save_location)
     plt.show()
 
     # Apply notch filter
-    channel1_filtered = notch_filter(channel1, fs=dataset['samplingRate'], freq=60)
+    channel1_filtered = notch_filter(channel1, fs=samplingRate, freq=60)
 
     # Apply bandpass filter
-    channel1_filtered = butter_bandpass_filter(channel1_filtered, lowcut=0.5, highcut=70, fs=dataset['samplingRate'])
+    channel1_filtered = butter_bandpass_filter(channel1_filtered, lowcut=0.5, highcut=70, fs=samplingRate)
 
     plt.plot(timerange, channel1_filtered)
-    plt.vlines(0, -1000, 1000, color='r', linestyles='dashed', label='Seizure Start')
-    plt.title(f"Seizure {seizureNumber}_Channel 1 Filtered")
+    plt.vlines(0, -400, 400, color='r', linestyles='dashed', label='Seizure Start')
+    plt.title(f"Seizure {seizureNumber}_Channel {channelName} Filtered")
     plt.legend()
     save_location = os.path.join(RESULT_FOLDER, f"seizure_{seizureNumber}_filtered.svg")
     plt.savefig(save_location)
@@ -60,20 +65,20 @@ def init_examination(dataset, channelNumber, RESULT_FOLDER, start_time=-3, end_t
 
     plt.plot(timerange, bipolar)
     plt.vlines(0, -200, 200, color='r', linestyles='dashed', label='Seizure Start')
-    plt.title(f"Seizure {seizureNumber}_Bipolar")
+    plt.title(f"Seizure {seizureNumber}_{channelName}_Bipolar")
     plt.legend()
     save_location = os.path.join(RESULT_FOLDER, f"seizure_{seizureNumber}_bipolar.svg")
     plt.savefig(save_location)
     plt.show()
 
     # Filter the bipolar montage
-    bipolar_filtered = notch_filter(bipolar, fs=dataset['samplingRate'], freq=60)
+    bipolar_filtered = notch_filter(bipolar, fs=samplingRate, freq=60)
 
-    bipolar_filtered = butter_bandpass_filter(bipolar_filtered, lowcut=0.5, highcut=70, fs=dataset['samplingRate'])
+    bipolar_filtered = butter_bandpass_filter(bipolar_filtered, lowcut=0.5, highcut=70, fs=samplingRate)
 
     plt.plot(timerange, bipolar_filtered)
     plt.vlines(0, -200, 200, color='r', linestyles='dashed', label='Seizure Start')
-    plt.title(f"Seizure {seizureNumber}_Bipolar Filtered")
+    plt.title(f"Seizure {seizureNumber}_{channelName}_Bipolar Filtered")
     plt.legend()
     save_location = os.path.join(RESULT_FOLDER, f"seizure_{seizureNumber}_bipolar_filtered.svg")
     plt.savefig(save_location)
@@ -83,26 +88,28 @@ def init_examination(dataset, channelNumber, RESULT_FOLDER, start_time=-3, end_t
     nperseg = samplingRate // 2
     noverlap = nperseg // 4
 
-    f, Pxx = welch(channel1, fs=dataset['samplingRate'], nperseg=nperseg, noverlap=noverlap)
+    f, Pxx = welch(channel1, fs=samplingRate, nperseg=nperseg, noverlap=noverlap)
     plt.plot(f, Pxx)
-    plt.title(f"Seizure {seizureNumber}_Channel 1 Power Spectral Density")
+    plt.title(f"Seizure {seizureNumber}_Channel {channelName} Power Spectral Density")
     plt.xlim(0, 100)
     save_location = os.path.join(RESULT_FOLDER, f"seizure_{seizureNumber}_psd.png")
     plt.savefig(save_location)
     plt.show()
 
-    f, Pxx = welch(channel1_filtered, fs=dataset['samplingRate'], nperseg=nperseg, noverlap=noverlap)
+    f, Pxx = welch(channel1_filtered, fs=samplingRate, nperseg=nperseg, noverlap=noverlap)
     plt.plot(f, Pxx)
     plt.xlim(0, 100)
-    plt.title(f"Seizure {seizureNumber}_Channel 1 Filtered Power Spectral Density")
+    plt.title(f"Seizure {seizureNumber}_Channel {channelName} Filtered Power Spectral Density")
     save_location = os.path.join(RESULT_FOLDER, f"seizure_{seizureNumber}_filtered_psd.png")
     plt.savefig(save_location)
     plt.show()
 
-    f, Pxx = welch(bipolar_filtered, fs=dataset['samplingRate'], nperseg=nperseg, noverlap=noverlap)
+    f, Pxx = welch(bipolar_filtered, fs=samplingRate, nperseg=nperseg, noverlap=noverlap)
     plt.plot(f, Pxx)
     plt.xlim(0, 100)
-    plt.title(f"Seizure {seizureNumber}_Bipolar Filtered Power Spectral Density")
+    plt.title(f"Seizure {seizureNumber}_{channelName}_Bipolar Filtered Power Spectral Density")
     save_location = os.path.join(RESULT_FOLDER, f"seizure_{seizureNumber}_bipolar_filtered_psd.png")
     plt.savefig(save_location)
     plt.show()
+
+

@@ -3,6 +3,7 @@ import numpy as np
 import os
 import pickle
 from datetime import datetime, timedelta
+import mne
 
 def constructDataset(data):
     '''
@@ -100,19 +101,13 @@ if __name__ == "__main__":
     # Load the data
     data_folder = os.path.join(DATA_FOLDER, "P0{:02d}".format(PAT_NO))
 
-    seizureData = []  # List to store the seizure data
+    seizureData = []
 
-    # Load the txt data file
-    for file in os.listdir(data_folder):
-        if file.endswith(".txt"):
-            txt_file = os.path.join(data_folder, file)
-            with open(txt_file, "r", encoding='utf-16') as f:
-                data = f.read()
-                # Extract the number from the file name
-                seizureNumber = int(''.join(filter(str.isdigit, file)))
+    # Load the edf data file
+    seizurefiles = [f for f in os.listdir(data_folder) if f.lower().endswith(".edf")]
 
-                seizuredatatep = {"seizureNumber": seizureNumber, "data": data}
-                seizureData.append(seizuredatatep)
+    for file in seizurefiles:
+        seizureData.append(mne.io.read_raw_edf(os.path.join(data_folder, file)))
 
     for data in seizureData:
         dataset = constructDataset(data)
