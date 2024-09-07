@@ -136,7 +136,7 @@ class Wavenet(nn.Module):
         return output
 
 
-def train_using_optimizer(model, X_train, X_test, y_train, y_test, epoches=50):
+def train_using_optimizer(model, X_train, X_test, y_train, y_test, epoches=200):
     epoch_accuracies = []
     epoch_loss = []
     epoch_test_loss = []

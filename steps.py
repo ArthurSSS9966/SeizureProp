@@ -2,7 +2,11 @@ import os
 import numpy as np
 import matplotlib.pyplot as plt
 from utils import notch_filter, butter_bandpass_filter
-from scipy.signal import welch
+from scipy.signal import welch, decimate
+from meegkit import dss
+from tqdm import tqdm
+from sklearn.preprocessing import RobustScaler
+from statsmodels.tsa.ar_model import AutoReg
 
 
 def init_examination(dataset, channelNumber, RESULT_FOLDER, start_time=-3, end_time=7):
@@ -113,3 +117,87 @@ def init_examination(dataset, channelNumber, RESULT_FOLDER, start_time=-3, end_t
     plt.show()
 
 
+def preprocessing(dataset, DATA_FOLDER):
+    eegData, timerange = dataset.ictal
+    referenceData, timerange_interictal = dataset.interictal
+
+    eegData = eegData.T * 1e6
+    referenceData = referenceData.T * 1e6
+    samplingRate = int(dataset.info["sfreq"])
+
+    # Remove line noise from each electrode
+    cleanedData = remove_line_each_electrode(eegData, dataset)
+    cleanedReferenceData = remove_line_each_electrode(referenceData, dataset)
+
+    # Apply the bandpass filter
+    for i in range(cleanedData.shape[1]):
+        cleanedData[:, i] = butter_bandpass_filter(cleanedData[:, i], lowcut=1, highcut=127, fs=samplingRate)
+        cleanedReferenceData[:, i] = butter_bandpass_filter(cleanedReferenceData[:, i], lowcut=1, highcut=127, fs=samplingRate)
+
+    # Downsample the data to 128 Hz
+    cleanedData = decimate(cleanedData, samplingRate//128, axis=0)
+    cleanedReferenceData = decimate(cleanedReferenceData, samplingRate//128, axis=0)
+
+    # Apply whitening using autoregressive model
+    cleanedData = apply_whitening(cleanedData, lags=1)
+    cleanedReferenceData = apply_whitening(cleanedReferenceData, lags=1)
+
+    # Normalize the data
+    cleanedData = normalize_signal(cleanedData, cleanedReferenceData)
+
+    # Store cleaned data
+
+def normalize_signal(signal, reference):
+    """
+    Normalize the signal using RobustScaler based on interictal data.
+    Args:
+        signal (numpy array): The input signal to be normalized.
+        interictal_data (numpy array): Interictal data used for normalization.
+    Returns:
+        numpy array: The normalized signal.
+    """
+    scaler = RobustScaler()
+    scaler.fit(reference.reshape(-1, 1))  # Fit scaler on interictal data
+    normalized_signal = scaler.transform(signal.reshape(-1, 1)).flatten()
+    return normalized_signal
+
+
+def apply_whitening(signal, lags=1):
+    '''
+    Apply whitening to the data using auto-regressive model
+    :param data: Data
+    :param lags: Number of lags
+    :return: Whitened data
+    '''
+    model = AutoReg(signal, lags=lags)
+    model_fitted = model.fit()
+    prewhitened_signal = signal - model_fitted.predict(start=lags)
+    return prewhitened_signal
+
+
+def remove_line_each_electrode(data, ele):
+    '''
+    Remove line noise from each electrode
+    :param data: Data
+    :param ele: Electrode
+    :return: Data after removing line noise
+    '''
+    for e in tqdm(ele.channels['Channel']):
+        data[:, e] = remove_line(data[:, e], [60, 100])
+    return data
+
+
+def remove_line(x1, lineF, Fs=2000):
+    '''
+
+    :param x1:
+    :param lineF:
+    :param Fs:
+    :return:
+    '''
+    print("Start Line noise removal")
+    xret = np.array(x1)
+    for f0 in lineF:
+        xret, _ = dss.dss_line_iter(xret, f0, Fs)
+    print("Removal Line noise removal Complete")
+    return xret

@@ -93,32 +93,111 @@ def constructDataset(data):
     return dataset
 
 
+def reconsEDF(raw, gridmap, PAT_NO):
+    '''
+    This function takes the .edf data and only extract the things that are necessary and save it to a new file
+    :param raw:
+    :return:
+    '''
+
+    filename = raw.annotations.description[0]
+
+    # Extract the data from the raw file
+    data, time = raw[:]
+    data = data.T
+    samplingRate = int(raw.info["sfreq"])
+
+    # Check if STIMSZ is present in the filename
+    if "STIMSZ" in filename:
+        # Find the index of the STIMSZ where annotation contains STIMSZ
+        SZON_ind = np.where(raw.annotations.description == "STIMSZ1")[0][0]
+        SZOFF_ind = np.where(raw.annotations.description == 'SZSTIMOFF')[0][0]
+
+    else:
+
+        SZON_ind = np.where(raw.annotations.description == 'SZON')[0][0]
+        SZOFF_ind = np.where(raw.annotations.description == 'SZOFF')[0][0]
+
+    SZ_time = int(raw.annotations.onset[SZON_ind] * samplingRate)
+    SZOFF_time = int(raw.annotations.onset[SZOFF_ind] * samplingRate)
+
+    # Define the preictal range
+    preictal_range = int(60*raw.info["sfreq"])  # 60 seconds before EOF and after SOF, also 60 seconds before Seizure
+
+    # Extract the preictal and ictal data
+    preictal_data = data[:preictal_range, :]
+    postictal_data = data[-preictal_range:, :]
+    ictal_data = data[SZ_time:SZOFF_time, :]
+
+    # Constrcut the dataset
+    dataset = EDFData(gridmap, filename, PAT_NO)
+    dataset.channelNumber = data.shape[1]
+    dataset.ictal = ictal_data
+    dataset.interictal = preictal_data
+    dataset.postictal = postictal_data
+    dataset.annotations = raw.annotations.description
+    dataset.annotations_onset = raw.annotations.onset
+    dataset.channel_names = raw.ch_names
+
+    return dataset
+
+
+class EDFData:
+    def __init__(self, gridmap, seizureNumber, patNo):
+        self.gridmap = gridmap
+        self.seizureNumber = seizureNumber
+        self.patNo = patNo
+
+    def __str__(self):
+        return f"Seizure {self.seizureNumber} for patient {self.patNo} data"
+
+    def __repr__(self):
+        return f"Seizure {self.seizureNumber} for patient {self.patNo} data"
+
+    def __getitem__(self, item):
+        if item == "gridmap":
+            return self.gridmap
+        elif item == "seizureNumber":
+            return self.seizureNumber
+        else:
+            raise ValueError(f"Item {item} not found")
+
+
 DATA_FOLDER = "D:/Blcdata/seizure"
 OUTPUT_FOLDER = "data"
-PAT_NO = 65
+PAT_NO = 66
 
 if __name__ == "__main__":
     # Load the data
     data_folder = os.path.join(DATA_FOLDER, "P0{:02d}".format(PAT_NO))
 
-    seizureData = []
+    # Load .txt grid map file
+    gridmap_loc = f"gridmap.P0{PAT_NO}.txt"
+    gridmap_loc = os.path.join(data_folder, gridmap_loc)
+    gridmap = pd.read_csv(gridmap_loc, sep=",")
 
     # Load the edf data file
     seizurefiles = [f for f in os.listdir(data_folder) if f.lower().endswith(".edf")]
 
     for file in seizurefiles:
-        seizureData.append(mne.io.read_raw_edf(os.path.join(data_folder, file)))
 
-    for data in seizureData:
-        dataset = constructDataset(data)
-        output_dir = os.path.join(OUTPUT_FOLDER, f"P{PAT_NO}")
+        try:
 
-        # Save the data to a new file
-        if not os.path.exists(output_dir):
-            print(f"Creating directory {output_dir}")
-            os.makedirs(output_dir)
+            data = mne.io.read_raw_edf(os.path.join(data_folder, file))
 
-        output_file = os.path.join(output_dir, f"seizure_{dataset['seizureNumber']}.pkl")
-        with open(output_file, "wb") as f:
-            pickle.dump(dataset, f)
-            print(f"Data for seizure {dataset['seizureNumber']} saved to {output_file}")
+            dataset = reconsEDF(data, gridmap, PAT_NO)
+            output_dir = os.path.join(OUTPUT_FOLDER, f"P{PAT_NO}")
+
+            # Save the data to a new file
+            if not os.path.exists(output_dir):
+                print(f"Creating directory {output_dir}")
+                os.makedirs(output_dir)
+
+            output_file = os.path.join(output_dir, f"seizure_{dataset['seizureNumber']}.pkl")
+            with open(output_file, "wb") as f:
+                pickle.dump(dataset, f)
+                print(f"Data for seizure {dataset['seizureNumber']} saved to {output_file}")
+
+        except Exception as e:
+            print(f"Error processing file {file}: {e}")
+            continue
