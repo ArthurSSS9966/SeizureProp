@@ -15,19 +15,22 @@ class LSTM(nn.Module):
         self.X_test = None
         self.X_train = None
 
-        self.lstm = nn.LSTM(input_dim, hidden_dim, batch_first=True).to('cuda:0')
+        self.lstm = nn.LSTM(input_size=input_dim, hidden_size=hidden_dim, batch_first=True).to('cuda:0')
         self.dropout = nn.Dropout(dropout).to('cuda:0')
 
         self.fc1 = nn.Linear(hidden_dim, 8).to('cuda:0')
         self.dropout2 = nn.Dropout(dropout).to('cuda:0')
         self.flatten = nn.Flatten().to('cuda:0')
 
-        self.fc2 = nn.Linear(8, output_dim).to('cuda:0')
+        self.fc2 = nn.Linear(8*23, output_dim).to('cuda:0')
 
         self.criteria = nn.CrossEntropyLoss()
         self.optimizer = optim.Adam(self.parameters(), lr=lr, weight_decay=weight_decay)
 
     def forward(self, x):
+        if x.shape[-1] != self.lstm.input_size:
+            x = x.transpose(1, 2)
+
         x = x.to('cuda:0')
 
         lstm_out, _ = self.lstm(x)
@@ -68,7 +71,7 @@ class CNN1D(nn.Module):
         self.dropout3 = nn.Dropout(dropout).to('cuda:0')
 
         self.flat1 = nn.Flatten().to('cuda:0')
-        self.fc1 = nn.Linear((hidden_dim//4 * kernel_size//8), hidden_dim//8).to('cuda:0')
+        self.fc1 = nn.Linear((hidden_dim//4) * (kernel_size//8), hidden_dim//8).to('cuda:0')
         self.dropout4 = nn.Dropout(dropout).to('cuda:0')
         self.fc2 = nn.Linear(hidden_dim//8, output_dim).to('cuda:0')
 
@@ -138,7 +141,7 @@ class Wavenet(nn.Module):
         self.dropout3 = nn.Dropout(dropout).to('cuda:0')
 
         self.flat1 = nn.Flatten().to('cuda:0')
-        self.fc1 = nn.Linear(hidden_dim//4 * (hidden_dim//4), hidden_dim//8).to('cuda:0')
+        self.fc1 = nn.Linear((hidden_dim//4) * (kernel_size//8), hidden_dim//8).to('cuda:0')  #TODO: Need to change 2 to the correct value
         self.dropout4 = nn.Dropout(dropout).to('cuda:0')
         self.fc2 = nn.Linear(hidden_dim//8, output_dim).to('cuda:0')
 
@@ -190,11 +193,15 @@ class Wavenet(nn.Module):
 
 def train_using_optimizer(model, trainloader, valloader, save_location=None,
                           epoches=200, device='cuda:0'):
+
+    model.random_init()
+
     for epoch in range(epoches):
         running_loss = 0.0
-        model.train()
 
         for i, (x, y) in enumerate(trainloader):
+            model.train()
+
             x, y = x.to(device), y.long().to(device)
 
             # Zero gradients
@@ -205,6 +212,7 @@ def train_using_optimizer(model, trainloader, valloader, save_location=None,
 
             # Compute loss and perform backward pass
             loss = model.criteria(outputs, y)
+
             loss.backward()
             model.optimizer.step()
 
