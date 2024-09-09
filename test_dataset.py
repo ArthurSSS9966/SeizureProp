@@ -7,7 +7,7 @@ import numpy as np
 import os
 from datasetConstruct import CustomDataset
 from torch.utils.data import DataLoader
-from models import CNN1D, train_using_optimizer
+from models import CNN1D, train_using_optimizer, Wavenet
 
 DATA_FOLDER = "D:/Blcdata/seizure/Test_data"
 
@@ -43,6 +43,7 @@ if __name__ == "__main__":
 
     # Create the model
     model = CNN1D(input_dim=channels, kernel_size=time_steps, output_dim=2)
+    model2 = Wavenet(input_dim=channels, output_dim=2, kernel_size=time_steps)
 
     # Train the model
-    train_using_optimizer(model, dataloader, valdataloader)
+    train_using_optimizer(model2, dataloader, valdataloader)

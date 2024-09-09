@@ -3,9 +3,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 import itertools
-from wavenet_modules import DilatedQueue, dilate
-import numpy as np
-
 
 
 # Define LSTM model
@@ -29,7 +26,6 @@ class LSTM(nn.Module):
 
         self.criteria = nn.CrossEntropyLoss()
         self.optimizer = optim.Adam(self.parameters(), lr=lr, weight_decay=weight_decay)
-
 
     def forward(self, x):
         x = x.to('cuda:0')
@@ -118,205 +114,82 @@ class CNN1D(nn.Module):
         output = self(x)
         return output
 
-
 class Wavenet(nn.Module):
-    """
-    A Complete Wavenet Model
-
-    Args:
-        layers (Int):               Number of layers in each block
-        blocks (Int):               Number of wavenet blocks of this model
-        dilation_channels (Int):    Number of channels for the dilated convolution
-        residual_channels (Int):    Number of channels for the residual connection
-        skip_channels (Int):        Number of channels for the skip connections
-        classes (Int):              Number of possible values each sample can have
-        output_length (Int):        Number of samples that are generated for each input
-        kernel_size (Int):          Size of the dilation kernel
-        dtype:                      Parameter type of this model
-
-    Shape:
-        - Input: :math:`(N, C_{in}, L_{in})`
-        - Output: :math:`()`
-        L should be the length of the receptive field
-    """
-    def __init__(self,
-                 layers=4,
-                 blocks=1,
-                 dilation_channels=32,
-                 residual_channels=32,
-                 skip_channels=256,
-                 end_channels=256,
-                 classes=2,
-                 output_length=32,
-                 kernel_size=2,
-                 dtype=torch.FloatTensor,
-                 bias=False):
-
+    def __init__(self, input_dim, output_dim, lr=0.001, hidden_dim=128, weight_decay=1e-5,
+                 dropout=0.2, kernel_size=128, dilation=1):
         super(Wavenet, self).__init__()
 
-        self.layers = layers
-        self.blocks = blocks
-        self.dilation_channels = dilation_channels
-        self.residual_channels = residual_channels
-        self.skip_channels = skip_channels
-        self.classes = classes
-        self.kernel_size = kernel_size
-        self.dtype = dtype
+        # Causal padding calculation
+        self.padding1 = (kernel_size - 1) * dilation
+        self.padding2 = (kernel_size//2 - 1) * dilation
+        self.padding3 = (kernel_size//4 - 1) * dilation
 
-        # build model
-        receptive_field = 1
-        init_dilation = 1
+        # Define layers with 'padding=0' (we'll apply custom causal padding in forward pass)
+        self.conv1 = nn.Conv1d(input_dim, hidden_dim, kernel_size=kernel_size, padding=0, dilation=dilation).to('cuda:0')
+        self.maxpool1 = nn.MaxPool1d(2).to('cuda:0')
+        self.dropout1 = nn.Dropout(dropout).to('cuda:0')
 
-        self.dilations = []
-        self.dilated_queues = []
-        # self.main_convs = nn.ModuleList()
-        self.filter_convs = nn.ModuleList()
-        self.gate_convs = nn.ModuleList()
-        self.residual_convs = nn.ModuleList()
-        self.skip_convs = nn.ModuleList()
+        self.conv2 = nn.Conv1d(hidden_dim, hidden_dim//2, kernel_size=kernel_size//2, padding=0, dilation=dilation).to('cuda:0')
+        self.maxpool2 = nn.MaxPool1d(2).to('cuda:0')
+        self.dropout2 = nn.Dropout(dropout).to('cuda:0')
 
-        # 1x1 convolution to create channels
-        self.start_conv = nn.Conv1d(in_channels=self.classes,
-                                    out_channels=residual_channels,
-                                    kernel_size=1,
-                                    bias=bias)
+        self.conv3 = nn.Conv1d(hidden_dim//2, hidden_dim//4, kernel_size=kernel_size//4, padding=0, dilation=dilation).to('cuda:0')
+        self.maxpool3 = nn.MaxPool1d(2).to('cuda:0')
+        self.dropout3 = nn.Dropout(dropout).to('cuda:0')
 
-        for b in range(blocks):
-            additional_scope = kernel_size - 1
-            new_dilation = 1
-            for i in range(layers):
-                # dilations of this layer
-                self.dilations.append((new_dilation, init_dilation))
+        self.flat1 = nn.Flatten().to('cuda:0')
+        self.fc1 = nn.Linear(hidden_dim//4 * (hidden_dim//4), hidden_dim//8).to('cuda:0')
+        self.dropout4 = nn.Dropout(dropout).to('cuda:0')
+        self.fc2 = nn.Linear(hidden_dim//8, output_dim).to('cuda:0')
 
-                # dilated queues for fast generation
-                self.dilated_queues.append(DilatedQueue(max_length=(kernel_size - 1) * new_dilation + 1,
-                                                        num_channels=residual_channels,
-                                                        dilation=new_dilation,
-                                                        dtype=dtype))
+        self.optimizer = optim.Adam(self.parameters(), lr=lr, weight_decay=weight_decay)
 
-                # dilated convolutions
-                self.filter_convs.append(nn.Conv1d(in_channels=residual_channels,
-                                                   out_channels=dilation_channels,
-                                                   kernel_size=kernel_size,
-                                                   bias=bias))
+        self.criteria = nn.CrossEntropyLoss()
 
-                self.gate_convs.append(nn.Conv1d(in_channels=residual_channels,
-                                                 out_channels=dilation_channels,
-                                                 kernel_size=kernel_size,
-                                                 bias=bias))
+    def forward(self, x):
+        x = x.to('cuda:0')
 
-                # 1x1 convolution for residual connection
-                self.residual_convs.append(nn.Conv1d(in_channels=dilation_channels,
-                                                     out_channels=residual_channels,
-                                                     kernel_size=1,
-                                                     bias=bias))
+        # Apply causal padding for the first conv layer
+        x = F.pad(x, (self.padding1, 0))
+        x = F.relu(self.conv1(x))
+        x = self.maxpool1(x)
+        x = self.dropout1(x)
 
-                # 1x1 convolution for skip connection
-                self.skip_convs.append(nn.Conv1d(in_channels=dilation_channels,
-                                                 out_channels=skip_channels,
-                                                 kernel_size=1,
-                                                 bias=bias))
+        # Apply causal padding for the second conv layer
+        x = F.pad(x, (self.padding2, 0))
+        x = F.relu(self.conv2(x))
+        x = self.maxpool2(x)
+        x = self.dropout2(x)
 
-                receptive_field += additional_scope
-                additional_scope *= 2
-                init_dilation = new_dilation
-                new_dilation *= 2
+        # Apply causal padding for the third conv layer
+        x = F.pad(x, (self.padding3, 0))
+        x = F.relu(self.conv3(x))
+        x = self.maxpool3(x)
+        x = self.dropout3(x)
 
-        self.end_conv_1 = nn.Conv1d(in_channels=skip_channels,
-                                  out_channels=end_channels,
-                                  kernel_size=1,
-                                  bias=True)
-
-        self.end_conv_2 = nn.Conv1d(in_channels=end_channels,
-                                    out_channels=classes,
-                                    kernel_size=1,
-                                    bias=True)
-
-        # self.output_length = 2 ** (layers - 1)
-        self.output_length = output_length
-        self.receptive_field = receptive_field
-
-    def wavenet(self, input, dilation_func):
-
-        x = self.start_conv(input)
-        skip = 0
-
-        # WaveNet layers
-        for i in range(self.blocks * self.layers):
-
-            #            |----------------------------------------|     *residual*
-            #            |                                        |
-            #            |    |-- conv -- tanh --|                |
-            # -> dilate -|----|                  * ----|-- 1x1 -- + -->	*input*
-            #                 |-- conv -- sigm --|     |
-            #                                         1x1
-            #                                          |
-            # ---------------------------------------> + ------------->	*skip*
-
-            (dilation, init_dilation) = self.dilations[i]
-
-            residual = dilation_func(x, dilation, init_dilation, i)
-
-            # dilated convolution
-            filter = self.filter_convs[i](residual)
-            filter = F.tanh(filter)
-            gate = self.gate_convs[i](residual)
-            gate = F.sigmoid(gate)
-            x = filter * gate
-
-            # parametrized skip connection
-            s = x
-            if x.size(2) != 1:
-                 s = dilate(x, 1, init_dilation=dilation)
-            s = self.skip_convs[i](s)
-            try:
-                skip = skip[:, :, -s.size(2):]
-            except:
-                skip = 0
-            skip = s + skip
-
-            x = self.residual_convs[i](x)
-            x = x + residual[:, :, (self.kernel_size - 1):]
-
-        x = F.relu(skip)
-        x = F.relu(self.end_conv_1(x))
-        x = self.end_conv_2(x)
+        x = self.flat1(x)
+        x = F.relu(self.fc1(x))
+        x = self.dropout4(x)
+        x = F.softmax(self.fc2(x), dim=1)
 
         return x
 
-    def wavenet_dilate(self, input, dilation, init_dilation, i):
-        x = dilate(input, dilation, init_dilation)
-        return x
+    def random_init(self):
+        for name, param in self.named_parameters():
+            if 'weight' in name:
+                nn.init.uniform_(param.data, -0.1, 0.1)
+            elif 'bias' in name:
+                nn.init.zeros_(param.data)
 
-    def queue_dilate(self, input, dilation, init_dilation, i):
-        queue = self.dilated_queues[i]
-        queue.enqueue(input.data[0])
-        x = queue.dequeue(num_deq=self.kernel_size,
-                          dilation=dilation)
-        x = x.unsqueeze(0)
-
-        return x
-
-    def forward(self, input):
-        x = self.wavenet(input,
-                         dilation_func=self.wavenet_dilate)
-
-        # reshape output
-        [n, c, l] = x.size()
-        l = self.output_length
-        x = x[:, :, -l:]
-        x = x.transpose(1, 2).contiguous()
-        x = x.view(n * l, c)
-        return x
+    def predict(self, x):
+        self.eval()
+        x = x.to('cuda:0')
+        output = self(x)
+        return output
 
 
-    def parameter_count(self):
-        par = list(self.parameters())
-        s = sum([np.prod(list(d.size())) for d in par])
-        return s
-
-
-def train_using_optimizer(model, trainloader, valloader, epoches=200, device='cuda:0'):
+def train_using_optimizer(model, trainloader, valloader, save_location=None,
+                          epoches=200, device='cuda:0'):
     for epoch in range(epoches):
         running_loss = 0.0
         model.train()
@@ -345,6 +218,9 @@ def train_using_optimizer(model, trainloader, valloader, epoches=200, device='cu
                 # Validate model every 100 mini-batches
                 val_loss, val_accuracy = evaluate_model(model, valloader, device)
                 print(f'Validation Loss: {val_loss:.4f}, Validation Accuracy: {val_accuracy:.4f}')
+
+        if save_location is not None:
+            torch.save(model.state_dict(), save_location)
 
     print('Finished Training')
 
