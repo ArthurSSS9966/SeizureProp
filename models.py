@@ -2,6 +2,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
+import itertools
+
 
 
 # Define LSTM model
@@ -49,23 +51,11 @@ class LSTM(nn.Module):
             elif 'bias' in name:
                 nn.init.zeros_(param.data)
 
-    def load_data(self, X_train, X_test, y_train, y_test):
-        self.X_train = X_train
-        self.X_test = X_test
-        self.y_train = y_train
-        self.y_test = y_test
 
-        # Convert to PyTorch tensors
-        self.X_train = torch.tensor(self.X_train.tolist()).float().to('cuda:0')
-        self.X_test = torch.tensor(self.X_test.tolist()).float().to('cuda:0')
-        self.y_train = torch.tensor(self.y_train.tolist()).long().to('cuda:0')
-        self.y_test = torch.tensor(self.y_test.tolist()).long()
-
-
-class Wavenet(nn.Module):
+class CNN1D(nn.Module):
     def __init__(self, input_dim, output_dim, lr=0.001, hidden_dim=128, weight_decay=1e-5,
-                 dropout=0.2, kernel_size=128, padding='causal'):
-        super(Wavenet, self).__init__()
+                 dropout=0.2, kernel_size=256, padding='same'):
+        super(CNN1D, self).__init__()
 
         self.cov1 = nn.Conv1d(input_dim, hidden_dim, kernel_size=kernel_size, padding=padding).to('cuda:0')
         self.maxpool1 = nn.MaxPool1d(2).to('cuda:0')
@@ -80,7 +70,7 @@ class Wavenet(nn.Module):
         self.dropout3 = nn.Dropout(dropout).to('cuda:0')
 
         self.flat1 = nn.Flatten().to('cuda:0')
-        self.fc1 = nn.Linear(hidden_dim//4 * (input_dim[1]//8), hidden_dim//8).to('cuda:0')
+        self.fc1 = nn.Linear((hidden_dim//4 * kernel_size//8), hidden_dim//8).to('cuda:0')
         self.dropout4 = nn.Dropout(dropout).to('cuda:0')
         self.fc2 = nn.Linear(hidden_dim//8, output_dim).to('cuda:0')
 
@@ -90,22 +80,26 @@ class Wavenet(nn.Module):
 
     def forward(self, x):
         x = x.to('cuda:0')
-        x = self.F.relu(self.cov1(x))
+
+        # Apply causal padding for the first conv layer
+        x = F.relu(self.cov1(x))
         x = self.maxpool1(x)
         x = self.dropout1(x)
 
-        x = self.F.relu(self.cov2(x))
+        # Apply causal padding for the second conv layer
+        x = F.relu(self.cov2(x))
         x = self.maxpool2(x)
         x = self.dropout2(x)
 
-        x = self.F.relu(self.cov3(x))
+        # Apply causal padding for the third conv layer
+        x = F.relu(self.cov3(x))
         x = self.maxpool3(x)
         x = self.dropout3(x)
 
         x = self.flat1(x)
-        x = self.F.relu(self.fc1(x))
+        x = F.relu(self.fc1(x))
         x = self.dropout4(x)
-        x = self.F.softmax(self.fc2(x))
+        x = F.softmax(self.fc2(x), dim=1)
 
         return x
 
@@ -116,19 +110,6 @@ class Wavenet(nn.Module):
             elif 'bias' in name:
                 nn.init.zeros_(param.data)
 
-    def load_data(self, X_train, X_test, y_train, y_test):
-        self.X_train = X_train
-        self.X_test = X_test
-        self.y_train = y_train
-        self.y_test = y_test
-
-        # Convert to PyTorch tensors
-        self.X_train = torch.tensor(self.X_train.tolist()).float().to('cuda:0')
-        self.X_test = torch.tensor(self.X_test.tolist()).float().to('cuda:0')
-        self.y_train = torch.tensor(self.y_train.tolist()).long().to('cuda:0')
-        self.y_test = torch.tensor(self.y_test.tolist()).long()
-
-
     def predict(self, x):
         self.eval()
         x = x.to('cuda:0')
@@ -136,38 +117,60 @@ class Wavenet(nn.Module):
         return output
 
 
-def train_using_optimizer(model, X_train, X_test, y_train, y_test, epoches=200):
-    epoch_accuracies = []
-    epoch_loss = []
-    epoch_test_loss = []
-
-    model.load_data(X_train, X_test, y_train, y_test)
+def train_using_optimizer(model, trainloader, valloader, epoches=200, device='cuda:0'):
 
     for epoch in range(epoches):
+        running_loss = 0.0
         model.train()
-        model.optimizer.zero_grad()
 
-        output = model(model.X_train)
-        loss = model.criteria(output, model.y_train)
+        for i, inputs in enumerate(trainloader):
+            x, y = inputs
 
-        loss.backward()
+            x = x.to(device)
+            y = y.long().to(device)
 
-        model.optimizer.step()
+            model.optimizer.zero_grad()
 
-        # Evaluate on the test set
-        test_output = model(model.X_test).cpu().detach()
-        _, predicted = torch.max(test_output, 1)
-        correct = (predicted == model.y_test).sum().item()
-        accuracy = correct / len(model.y_test)
-        epoch_accuracies.append(accuracy)
+            outputs = model(x)
+            outputs = outputs.float()
 
-        loss_cpu = loss.cpu().detach()
-        epoch_loss.append(loss_cpu.item())
+            loss = model.criteria(outputs, y)
 
-        test_loss = model.criteria(test_output, model.y_test).cpu().detach()
-        epoch_test_loss.append(test_loss.item())
+            loss.backward()
+            model.optimizer.step()
 
-        if (epoch + 1) % 10 == 0:
-            print(f'Epoch [{epoch + 1}/{epoches}], Loss: {loss.item()}, Test Accuracy: {accuracy * 100}%')
+            running_loss += loss.item()
 
-    return epoch_accuracies, epoch_loss, epoch_test_loss
+            if i % 100 == 99:  # Print every 10 mini-batches
+                print(f'Epoch [{epoch+1}/{epoches}], Step [{i+1}/{len(trainloader)}], Loss: {running_loss / 10:.4f}')
+                running_loss = 0.0
+
+                # Validate the model
+                model.eval()
+
+                # Randomly select 100 samples from the validation set
+                with torch.no_grad():
+                    val_loss = 0.0
+                    val_accuracies = []
+                    for i, valdata in enumerate(itertools.islice(valloader, 100)):
+                        x, y = valdata
+
+                        x = x.to(device)
+                        y = y.long().to(device)
+
+                        outputs = model(x)
+                        outputs = outputs.float()
+
+                        loss = model.criteria(outputs, y)
+                        val_loss += loss.item()
+
+                        accuracy = (torch.argmax(outputs, dim=1) == y).float().mean()
+                        val_accuracies.append(accuracy.item())
+
+                    val_accuracies = torch.tensor(val_accuracies)
+                    val_accuracies_mean = val_accuracies.mean()
+                    print(f'Validation loss: {val_loss / len(valloader)}, Validation accuracy: {val_accuracies_mean}')
+
+
+    print('Finished Training')
+

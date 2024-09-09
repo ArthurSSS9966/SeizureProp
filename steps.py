@@ -146,6 +146,13 @@ def preprocessing(dataset, DATA_FOLDER):
     cleanedData = normalize_signal(cleanedData, cleanedReferenceData)
 
     # Store cleaned data
+    save_location = os.path.join(DATA_FOLDER, f"seizure_{dataset.seizureNumber}_CLEANED.pkl")
+    dataset.ictal = cleanedData
+    dataset.interictal = cleanedReferenceData
+    dataset.save(save_location)
+
+    return dataset
+
 
 def normalize_signal(signal, reference):
     """

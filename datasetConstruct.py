@@ -4,6 +4,8 @@ import os
 import pickle
 from datetime import datetime, timedelta
 import mne
+from torch.utils.data import Dataset
+import torch
 
 def constructDataset(data):
     '''
@@ -161,6 +163,21 @@ class EDFData:
             return self.seizureNumber
         else:
             raise ValueError(f"Item {item} not found")
+
+
+class CustomDataset(Dataset):
+    def __init__(self, X, y=None):
+        # Convert numpy array to PyTorch tensor
+        self.X = torch.tensor(X, dtype=torch.float32)
+        self.y = torch.tensor(y, dtype=torch.float32) if y is not None else None
+
+    def __len__(self):
+        return len(self.X)  # Number of samples
+
+    def __getitem__(self, idx):
+        X_sample = self.X[idx]
+        y_label = self.y[idx]  # Assuming self.y is defined in __init__
+        return X_sample, y_label
 
 
 DATA_FOLDER = "D:/Blcdata/seizure"
