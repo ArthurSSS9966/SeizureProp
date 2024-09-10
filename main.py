@@ -1,4 +1,4 @@
-from steps import init_examination
+from steps import init_examination, preprocessing
 import mne
 import os
 import pickle
@@ -22,4 +22,6 @@ if __name__ == "__main__":
     dataset.seizureNumber = SEIZURE_NO
 
     # init_examination(dataset, 20, RESULT_FOLDER, start_time=-3, end_time=7)
+
+    dataset = preprocessing(dataset, DATA_FOLDER)
 

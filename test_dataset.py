@@ -78,5 +78,5 @@ if __name__ == "__main__":
     model3 = LSTM(input_dim=channels, output_dim=2)
 
     # Train the model
-    train_using_optimizer(model2, dataloader, valdataloader)
+    train_using_optimizer(model2, dataloader, valdataloader, MODEL_FOLDER)
 

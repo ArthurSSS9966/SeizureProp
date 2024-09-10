@@ -117,6 +117,7 @@ class CNN1D(nn.Module):
         output = self(x)
         return output
 
+
 class Wavenet(nn.Module):
     def __init__(self, input_dim, output_dim, lr=0.001, hidden_dim=128, weight_decay=1e-5,
                  dropout=0.2, kernel_size=128, dilation=1):
@@ -251,3 +252,4 @@ def evaluate_model(model, dataloader, device, num_batches=100):
 
     val_accuracies_mean = torch.tensor(val_accuracies).mean()
     return val_loss / num_batches, val_accuracies_mean
+
