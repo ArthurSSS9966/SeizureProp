@@ -3,6 +3,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from utils import notch_filter, butter_bandpass_filter
 from scipy.signal import welch, decimate
+import pickle
 from meegkit import dss
 from tqdm import tqdm
 from sklearn.preprocessing import RobustScaler
@@ -118,38 +119,55 @@ def init_examination(dataset, channelNumber, RESULT_FOLDER, start_time=-3, end_t
 
 
 def preprocessing(dataset, DATA_FOLDER):
-    eegData, timerange = dataset.ictal
-    referenceData, timerange_interictal = dataset.interictal
+    eegData = dataset.ictal
+    referenceData = dataset.interictal
 
-    eegData = eegData.T * 1e6
-    referenceData = referenceData.T * 1e6
-    samplingRate = int(dataset.info["sfreq"])
+    eegData = eegData * 1e6
+    referenceData = referenceData * 1e6
+    samplingRate = dataset.samplingRate
 
     # Remove line noise from each electrode
-    cleanedData = remove_line_each_electrode(eegData, dataset)
-    cleanedReferenceData = remove_line_each_electrode(referenceData, dataset)
+    cleanedData = remove_line_each_electrode(eegData, dataset.gridmap)
+    cleanedReferenceData = remove_line_each_electrode(referenceData, dataset.gridmap)
+    #
+    # cleanedData = eegData
+    # cleanedReferenceData = referenceData
 
     # Apply the bandpass filter
     for i in range(cleanedData.shape[1]):
         cleanedData[:, i] = butter_bandpass_filter(cleanedData[:, i], lowcut=1, highcut=127, fs=samplingRate)
         cleanedReferenceData[:, i] = butter_bandpass_filter(cleanedReferenceData[:, i], lowcut=1, highcut=127, fs=samplingRate)
 
-    # Downsample the data to 128 Hz
-    cleanedData = decimate(cleanedData, samplingRate//128, axis=0)
-    cleanedReferenceData = decimate(cleanedReferenceData, samplingRate//128, axis=0)
+    try:
+        # Downsample the data to 128 Hz
+        cleanedData = decimate(cleanedData, samplingRate//128, axis=0)
+        cleanedReferenceData = decimate(cleanedReferenceData, samplingRate//128, axis=0)
+        dataset.downsample = True
+    except Exception as e:
+        print(f"Cannot downsample the data: {e}")
 
-    # Apply whitening using autoregressive model
-    cleanedData = apply_whitening(cleanedData, lags=1)
-    cleanedReferenceData = apply_whitening(cleanedReferenceData, lags=1)
+    try:
+        # Apply whitening using autoregressive model
+        cleanedData = apply_whitening(cleanedData, lags=1)
+        cleanedReferenceData = apply_whitening(cleanedReferenceData, lags=1)
+        dataset.whitening = True
+    except Exception as e:
+        print(f"Cannot apply whitening to the data: {e}")
 
-    # Normalize the data
-    cleanedData = normalize_signal(cleanedData, cleanedReferenceData)
+    try:
+        # Normalize the data
+        cleanedData = normalize_signal(cleanedData, cleanedReferenceData)
+    except Exception as e:
+        print(f"Cannot normalize the data: {e}")
 
     # Store cleaned data
     save_location = os.path.join(DATA_FOLDER, f"seizure_{dataset.seizureNumber}_CLEANED.pkl")
     dataset.ictal = cleanedData
     dataset.interictal = cleanedReferenceData
-    dataset.save(save_location)
+    pickle.dump(dataset, open(save_location, "wb"))
+    print("Data saved to: ", save_location)
+
+    print(f"Preprocessing of seizure {dataset.seizureNumber} is complete.")
 
     return dataset
 
@@ -169,17 +187,49 @@ def normalize_signal(signal, reference):
     return normalized_signal
 
 
-def apply_whitening(signal, lags=1):
+def apply_whitening(data, lags=1):
     '''
-    Apply whitening to the data using auto-regressive model
-    :param data: Data
-    :param lags: Number of lags
-    :return: Whitened data
+    Apply whitening to an array of signals using auto-regressive model
+    :param data: 2D numpy array of shape (n_samples, n_signals) or 1D array
+    :param lags: Number of lags for the autoregressive model
+    :return: Whitened data with the same shape as input
     '''
-    model = AutoReg(signal, lags=lags)
-    model_fitted = model.fit()
-    prewhitened_signal = signal - model_fitted.predict(start=lags)
-    return prewhitened_signal
+    # Ensure the input is a numpy array
+    data = np.asarray(data)
+
+    # Check if input is 1D or 2D
+    if data.ndim == 1:
+        data = data.reshape(-1, 1)
+    elif data.ndim > 2:
+        raise ValueError("Input data must be 1D or 2D array")
+
+    n_samples, n_signals = data.shape
+    whitened_data = np.zeros_like(data)
+
+    for i in tqdm(range(n_signals), desc="Whitening signals"):
+        signal = data[:, i]
+
+        # Fit the AutoReg model
+        model = AutoReg(signal, lags=lags)
+        model_fitted = model.fit()
+
+        # Generate predictions
+        predictions = model_fitted.predict(start=lags, end=n_samples - 1)
+
+        # Compute the whitened signal
+        whitened_signal = np.zeros_like(signal)
+        whitened_signal[lags:] = signal[lags:] - predictions
+
+        # Handle the first 'lags' elements
+        whitened_signal[:lags] = signal[:lags] - np.mean(signal)
+
+        whitened_data[:, i] = whitened_signal
+
+    # If input was 1D, return 1D output
+    if data.shape[1] == 1:
+        whitened_data = whitened_data.squeeze()
+
+    return whitened_data
 
 
 def remove_line_each_electrode(data, ele):
@@ -189,8 +239,9 @@ def remove_line_each_electrode(data, ele):
     :param ele: Electrode
     :return: Data after removing line noise
     '''
-    for e in tqdm(ele.channels['Channel']):
-        data[:, e] = remove_line(data[:, e], [60, 100])
+    for e in tqdm(ele['Channel']):
+        start, end = map(int, e.split(':'))
+        data[:, start:end+1] = remove_line(data[:, start:end+1], [60, 100])
     return data
 
 

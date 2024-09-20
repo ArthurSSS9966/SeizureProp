@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 import mne
 from torch.utils.data import Dataset
 import torch
+from utils import process_edf_channels_and_create_new_gridmap, find_seizure_annotations
 
 def constructDataset(data):
     '''
@@ -104,10 +105,23 @@ def reconsEDF(raw, gridmap, PAT_NO):
 
     filename = raw.annotations.description[0]
 
+    # Find the correct file name in description that match SZXX where XX is the seizure number
+
+    # Check if filename starts with SZ
+    if not (filename.startswith("SZ") or filename.startswith("STIM")):
+        for i, desc in enumerate(raw.annotations.description):
+            if desc.startswith("SZ"):
+                filename = desc
+                break
+
     # Extract the data from the raw file
     data, time = raw[:]
     data = data.T
     samplingRate = int(raw.info["sfreq"])
+
+    # Select useful channels based on gridmap
+    channel_list = raw.ch_names
+    gridmap, data = process_edf_channels_and_create_new_gridmap(gridmap, channel_list, data)
 
     # Check if STIMSZ is present in the filename
     if "STIMSZ" in filename:
@@ -116,9 +130,7 @@ def reconsEDF(raw, gridmap, PAT_NO):
         SZOFF_ind = np.where(raw.annotations.description == 'SZSTIMOFF')[0][0]
 
     else:
-
-        SZON_ind = np.where(raw.annotations.description == 'SZON')[0][0]
-        SZOFF_ind = np.where(raw.annotations.description == 'SZOFF')[0][0]
+        SZON_ind, SZOFF_ind = find_seizure_annotations(raw)
 
     SZ_time = int(raw.annotations.onset[SZON_ind] * samplingRate)
     SZOFF_time = int(raw.annotations.onset[SZOFF_ind] * samplingRate)
@@ -134,6 +146,7 @@ def reconsEDF(raw, gridmap, PAT_NO):
     # Constrcut the dataset
     dataset = EDFData(gridmap, filename, PAT_NO)
     dataset.channelNumber = data.shape[1]
+    dataset.samplingRate = samplingRate
     dataset.ictal = ictal_data
     dataset.interictal = preictal_data
     dataset.postictal = postictal_data
@@ -198,23 +211,23 @@ if __name__ == "__main__":
 
     for file in seizurefiles:
 
-        try:
+        # try:
 
-            data = mne.io.read_raw_edf(os.path.join(data_folder, file))
+        data = mne.io.read_raw_edf(os.path.join(data_folder, file))
 
-            dataset = reconsEDF(data, gridmap, PAT_NO)
-            output_dir = os.path.join(OUTPUT_FOLDER, f"P{PAT_NO}")
+        dataset = reconsEDF(data, gridmap, PAT_NO)
+        output_dir = os.path.join(OUTPUT_FOLDER, f"P{PAT_NO}")
 
-            # Save the data to a new file
-            if not os.path.exists(output_dir):
-                print(f"Creating directory {output_dir}")
-                os.makedirs(output_dir)
+        # Save the data to a new file
+        if not os.path.exists(output_dir):
+            print(f"Creating directory {output_dir}")
+            os.makedirs(output_dir)
 
-            output_file = os.path.join(output_dir, f"seizure_{dataset['seizureNumber']}.pkl")
-            with open(output_file, "wb") as f:
-                pickle.dump(dataset, f)
-                print(f"Data for seizure {dataset['seizureNumber']} saved to {output_file}")
+        output_file = os.path.join(output_dir, f"seizure_{dataset['seizureNumber']}.pkl")
+        with open(output_file, "wb") as f:
+            pickle.dump(dataset, f)
+            print(f"Data for seizure {dataset['seizureNumber']} saved to {output_file}")
 
-        except Exception as e:
-            print(f"Error processing file {file}: {e}")
-            continue
+        # except Exception as e:
+        #     print(f"Error processing file {file}: {e}")
+        #     continue
