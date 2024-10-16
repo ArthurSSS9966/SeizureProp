@@ -125,10 +125,12 @@ def preprocessing(dataset, DATA_FOLDER):
     eegData = eegData * 1e6
     referenceData = referenceData * 1e6
     samplingRate = dataset.samplingRate
+    postictalData = dataset.postictal
 
     # Remove line noise from each electrode
     cleanedData = remove_line_each_electrode(eegData, dataset.gridmap)
     cleanedReferenceData = remove_line_each_electrode(referenceData, dataset.gridmap)
+    postictalData = remove_line_each_electrode(postictalData, dataset.gridmap)
     #
     # cleanedData = eegData
     # cleanedReferenceData = referenceData
@@ -137,12 +139,15 @@ def preprocessing(dataset, DATA_FOLDER):
     for i in range(cleanedData.shape[1]):
         cleanedData[:, i] = butter_bandpass_filter(cleanedData[:, i], lowcut=1, highcut=127, fs=samplingRate)
         cleanedReferenceData[:, i] = butter_bandpass_filter(cleanedReferenceData[:, i], lowcut=1, highcut=127, fs=samplingRate)
+        postictalData[:, i] = butter_bandpass_filter(postictalData[:, i], lowcut=1, highcut=127, fs=samplingRate)
 
     try:
         # Downsample the data to 128 Hz
         cleanedData = decimate(cleanedData, samplingRate//128, axis=0)
         cleanedReferenceData = decimate(cleanedReferenceData, samplingRate//128, axis=0)
+        postictalData = decimate(postictalData, samplingRate//128, axis=0)
         dataset.downsample = True
+        dataset.samplingRate = 128
     except Exception as e:
         print(f"Cannot downsample the data: {e}")
 
@@ -150,6 +155,7 @@ def preprocessing(dataset, DATA_FOLDER):
         # Apply whitening using autoregressive model
         cleanedData = apply_whitening(cleanedData, lags=1)
         cleanedReferenceData = apply_whitening(cleanedReferenceData, lags=1)
+        cleanedPostictalData = apply_whitening(postictalData, lags=1)
         dataset.whitening = True
     except Exception as e:
         print(f"Cannot apply whitening to the data: {e}")
@@ -157,6 +163,7 @@ def preprocessing(dataset, DATA_FOLDER):
     try:
         # Normalize the data
         cleanedData = normalize_signal(cleanedData, cleanedReferenceData)
+        cleanedPostictalData = normalize_signal(cleanedPostictalData, cleanedReferenceData)
     except Exception as e:
         print(f"Cannot normalize the data: {e}")
 
@@ -164,6 +171,7 @@ def preprocessing(dataset, DATA_FOLDER):
     save_location = os.path.join(DATA_FOLDER, f"seizure_{dataset.seizureNumber}_CLEANED.pkl")
     dataset.ictal = cleanedData
     dataset.interictal = cleanedReferenceData
+    dataset.postictal = cleanedPostictalData
     pickle.dump(dataset, open(save_location, "wb"))
     print("Data saved to: ", save_location)
 
@@ -181,10 +189,14 @@ def normalize_signal(signal, reference):
     Returns:
         numpy array: The normalized signal.
     """
-    scaler = RobustScaler()
-    scaler.fit(reference.reshape(-1, 1))  # Fit scaler on interictal data
-    normalized_signal = scaler.transform(signal.reshape(-1, 1)).flatten()
-    return normalized_signal
+
+    for i in range(signal.shape[1]):
+        scaler = RobustScaler()
+        scaler.fit(reference[:, i].reshape(-1, 1))
+        normalized_signal = scaler.transform(signal[:, i].reshape(-1, 1)).squeeze()
+        signal[:, i] = normalized_signal
+
+    return signal
 
 
 def apply_whitening(data, lags=1):

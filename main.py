@@ -3,10 +3,18 @@ import pickle
 
 from datasetConstruct import EDFData
 from steps import init_examination, preprocessing
+from utils import load_seizure
 
 DATA_FOLDER = "data"
 RESULT_FOLDER = "result"
 PAT_NO = 66
+
+
+def train_test(model, PAT_NO, data_folder):
+    # Load the data
+    data_folder = os.path.join(data_folder, f"P{PAT_NO}")
+    seizure = load_seizure(data_folder, 1)
+
 
 
 if __name__ == "__main__":

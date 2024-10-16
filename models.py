@@ -10,11 +10,6 @@ class LSTM(nn.Module):
     def __init__(self, input_dim, output_dim, lr=0.001, hidden_dim=50, weight_decay=1e-5, dropout=0.2):
 
         super(LSTM, self).__init__()
-        self.y_test = None
-        self.y_train = None
-        self.X_test = None
-        self.X_train = None
-
         self.lstm = nn.LSTM(input_size=input_dim, hidden_size=hidden_dim, batch_first=True).to('cuda:0')
         self.dropout = nn.Dropout(dropout).to('cuda:0')
 
@@ -195,6 +190,8 @@ class Wavenet(nn.Module):
 def train_using_optimizer(model, trainloader, valloader, save_location=None,
                           epoches=200, device='cuda:0'):
 
+    train_loss, val_losses, val_accuracies = [], [], []
+
     model.random_init()
 
     for epoch in range(epoches):
@@ -219,22 +216,27 @@ def train_using_optimizer(model, trainloader, valloader, save_location=None,
 
             running_loss += loss.item()
 
-            # Print loss every 100 mini-batches
-            if i % 100 == 99:
-                print(f'Epoch [{epoch+1}/{epoches}], Step [{i+1}/{len(trainloader)}], Loss: {running_loss / 100:.4f}')
-                running_loss = 0.0
+        print(f'Epoch [{epoch+1}/{epoches}], Loss: {running_loss / len(trainloader):.4f}')
+        train_loss.append(running_loss / len(trainloader))
 
-                # Validate model every 100 mini-batches
-                val_loss, val_accuracy = evaluate_model(model, valloader, device)
-                print(f'Validation Loss: {val_loss:.4f}, Validation Accuracy: {val_accuracy:.4f}')
+        if epoch % 20 == 19:
+            # Validate model every 100 mini-batches
+            val_loss, val_accuracy = evaluate_model(model, valloader, device)
+
+            val_losses.append(val_loss)
+            val_accuracies.append(val_accuracy)
+
+            print(f'Validation Loss: {val_loss:.4f}, Validation Accuracy: {val_accuracy:.4f}')
 
         if save_location is not None:
             torch.save(model.state_dict(), save_location)
 
     print('Finished Training')
 
+    return train_loss, val_losses, val_accuracies
 
-def evaluate_model(model, dataloader, device, num_batches=100):
+
+def evaluate_model(model, dataloader, device='cuda:0', num_batches=100):
     model.eval()
     val_loss = 0.0
     val_accuracies = []
@@ -250,6 +252,7 @@ def evaluate_model(model, dataloader, device, num_batches=100):
             accuracy = (torch.argmax(outputs, dim=1) == y).float().mean()
             val_accuracies.append(accuracy.item())
 
-    val_accuracies_mean = torch.tensor(val_accuracies).mean()
+    val_accuracies_mean = torch.tensor(val_accuracies).mean().detach().cpu().numpy()
+
     return val_loss / num_batches, val_accuracies_mean
 
