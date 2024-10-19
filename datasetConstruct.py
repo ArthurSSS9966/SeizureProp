@@ -7,6 +7,7 @@ import mne
 from torch.utils.data import Dataset
 import torch
 from utils import process_edf_channels_and_create_new_gridmap, find_seizure_annotations
+from utils import split_data
 
 def constructDataset(data):
     '''
@@ -193,11 +194,45 @@ class CustomDataset(Dataset):
         return X_sample, y_label
 
 
-DATA_FOLDER = "D:/Blcdata/seizure"
-OUTPUT_FOLDER = "data"
-PAT_NO = 66
+def load_seizure(path):
+    """
+    Load the seizure data from the specified path and seizure number.
+
+    :param path: Path to the seizure data
+    :param seizure_number: Seizure number to load
+    :return: Tuple of (raw, gridmap)
+    """
+
+    seizure_data_combined = EDFData(None, None, None)
+
+    # Find all seizure data that ends with CLEANED.pkl and does not have STIM in the name
+    cleaned_files = [f for f in os.listdir(path) if f.endswith("CLEANED.pkl") and "STIM" not in f]
+
+    for cleaned_file in cleaned_files:
+        # Load the raw EEG data
+        raw = pickle.load(open(os.path.join(path, cleaned_file), "rb"))
+
+        raw.interictal = split_data(raw.interictal, raw.samplingRate)
+        raw.ictal = split_data(raw.ictal, raw.samplingRate)
+        raw.postictal = split_data(raw.postictal, raw.samplingRate)
+
+        if seizure_data_combined.patNo is None:
+            seizure_data_combined = raw
+        else:
+            seizure_data_combined.ictal = np.vstack((seizure_data_combined.ictal, raw.ictal))
+            seizure_data_combined.interictal = np.vstack((seizure_data_combined.interictal, raw.interictal))
+            seizure_data_combined.postictal = np.vstack((seizure_data_combined.postictal, raw.postictal))
+
+        seizure_data_combined.seizureNumber = 'All'
+
+    return seizure_data_combined
+
 
 if __name__ == "__main__":
+    DATA_FOLDER = "D:/Blcdata/seizure"
+    OUTPUT_FOLDER = "data"
+    PAT_NO = 66
+
     # Load the data
     data_folder = os.path.join(DATA_FOLDER, "P0{:02d}".format(PAT_NO))
 

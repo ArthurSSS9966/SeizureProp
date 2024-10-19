@@ -131,20 +131,6 @@ def find_seizure_annotations(raw):
     # Return the first occurrence of each
     return SZON_indices[0], SZOFF_indices[0]
 
-
-def load_seizure(path, seizure_number):
-    """
-    Load the seizure data from the specified path and seizure number.
-
-    :param path: Path to the seizure data
-    :param seizure_number: Seizure number to load
-    :return: Tuple of (raw, gridmap)
-    """
-    # Load the raw EEG data
-    raw = pickle.load(open(os.path.join(path, f"seizure_SZ{seizure_number}_CLEANED.pkl"), "rb"))
-
-    return raw
-
 def split_data(data, fs):
     '''
     Function to split data into chunks of size fs
