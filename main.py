@@ -13,7 +13,7 @@ MODEL_FOLDER = "model"
 PAT_NO = 66
 
 
-def train_test(model, PAT_NO, data_folder, TRAIN=True, epoches=200):
+def train_test(model, PAT_NO, data_folder, TRAIN=True, epochs=200):
     # Load the data
     data_folder = os.path.join(data_folder, f"P{PAT_NO}")
     seizure = load_seizure(data_folder)
@@ -29,10 +29,12 @@ def train_test(model, PAT_NO, data_folder, TRAIN=True, epoches=200):
     if TRAIN:
 
         # Train the model
-        train_loss, val_los, val_accuracy = train_using_optimizer(model1, train_loader, val_loader, MODEL_FOLDER, epoches=epoches)
+        train_loss, val_los, val_accuracy = train_using_optimizer(model1, train_loader,
+                                                                  val_loader, MODEL_FOLDER,
+                                                                  epochs=epochs)
 
     else:
-        model1.load_state_dict(torch.load(os.path.join(MODEL_FOLDER, f"{model1.__class__.__name__}_epoch{epoches}.pth")))
+        model1.load_state_dict(torch.load(os.path.join(MODEL_FOLDER, f"{model1.__class__.__name__}_epoch{epochs}.pth")))
 
     val_loss, val_accuracy = evaluate_model(model1, val_loader)
 
