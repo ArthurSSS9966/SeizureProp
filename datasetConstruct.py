@@ -8,6 +8,7 @@ from torch.utils.data import Dataset
 import torch
 from utils import process_edf_channels_and_create_new_gridmap, find_seizure_annotations
 from utils import split_data
+from torch.utils.data import DataLoader
 
 def constructDataset(data):
     '''
@@ -127,7 +128,7 @@ def reconsEDF(raw, gridmap, PAT_NO):
     # Check if STIMSZ is present in the filename
     if "STIMSZ" in filename:
         # Find the index of the STIMSZ where annotation contains STIMSZ
-        SZON_ind = np.where(raw.annotations.description == "STIMSZ1")[0][0]
+        SZON_ind = np.where(raw.annotations.description == "SZSTIMON")[0][0]
         SZOFF_ind = np.where(raw.annotations.description == 'SZSTIMOFF')[0][0]
 
     else:
@@ -138,11 +139,14 @@ def reconsEDF(raw, gridmap, PAT_NO):
 
     # Define the preictal range
     preictal_range = int(60*raw.info["sfreq"])  # 60 seconds before EOF and after SOF, also 60 seconds before Seizure
+    pre_range = int(10*raw.info["sfreq"])  # 10 seconds before EOF and after SOF, also 10 seconds before Seizure
 
     # Extract the preictal and ictal data
     preictal_data = data[:preictal_range, :]
     postictal_data = data[-preictal_range:, :]
     ictal_data = data[SZ_time:SZOFF_time, :]
+    preictal_data2 = data[SZ_time-pre_range:SZ_time, :]
+    postictal_data2 = data[SZOFF_time:SZOFF_time+pre_range, :]
 
     # Constrcut the dataset
     dataset = EDFData(gridmap, filename, PAT_NO)
@@ -151,9 +155,18 @@ def reconsEDF(raw, gridmap, PAT_NO):
     dataset.ictal = ictal_data
     dataset.interictal = preictal_data
     dataset.postictal = postictal_data
+    dataset.preictal2 = preictal_data2
+    dataset.postictal2 = postictal_data2
     dataset.annotations = raw.annotations.description
     dataset.annotations_onset = raw.annotations.onset
     dataset.channel_names = raw.ch_names
+    # Add documentation to each variable
+    dataset.documentation= ("ictal: Data during seizure\n,"
+                            "preictal: 60 seconds free of seizure Data before seizure\n,"
+                            "postictal: 60 seconds free of seizure Data after seizure\n,"
+                            "preictal2: 10 seconds Data right before seizure\n,"
+                            "postictal2: 10 seconds Data right after seizure"
+                            )
 
     return dataset
 
@@ -226,6 +239,73 @@ def load_seizure(path):
         seizure_data_combined.seizureNumber = 'All'
 
     return seizure_data_combined
+
+
+def load_single_seizure(path, seizure_number):
+    """
+    Load the seizure data from the specified path and seizure number.
+
+    :param path: Path to the seizure data
+    :param seizure_number: Seizure number to load
+    :return: Tuple of (raw, gridmap)
+    """
+
+    # Find all seizure data that ends with CLEANED.pkl and does not have STIM in the name
+    cleaned_file = [f for f in os.listdir(path) if f.endswith("CLEANED.pkl") and f.startswith(f"seizure_SZ{seizure_number}")]
+
+    raw = pickle.load(open(os.path.join(path, cleaned_file[0]), "rb"))
+
+    raw.interictal = split_data(raw.interictal, raw.samplingRate)
+    raw.ictal = split_data(raw.ictal, raw.samplingRate)
+    raw.postictal = split_data(raw.postictal, raw.samplingRate)
+
+    return raw
+
+
+def create_dataset(seizure, train_percentage=0.8, batch_size=32):
+
+    seizure_data = seizure.ictal
+    nonseizure_data = seizure.interictal
+    nonseizure_data_postictal = seizure.postictal
+
+    # Combine the nonseizure and postictal data
+    nonseizure_data = np.concatenate((nonseizure_data, nonseizure_data_postictal), axis=0)
+
+    # Flatten the train dataset from [Sample, Time, Channel] to [Sample * Channel, Time, 1]
+    seizure_data = seizure_data.reshape(-1, seizure_data.shape[1], 1)
+    nonseizure_data = nonseizure_data.reshape(-1, seizure_data.shape[1], 1)
+
+    # Create the labels
+    seizure_labels = np.ones(len(seizure_data))
+    nonseizure_labels = np.zeros(len(nonseizure_data))
+
+    seizure_data = seizure_data.transpose(0, 2, 1)
+    nonseizure_data = nonseizure_data.transpose(0, 2, 1)
+
+    # Combine the dataset and labels, then shuffle them and create training and validation sets
+    data = np.concatenate((seizure_data, nonseizure_data), axis=0)
+    labels = np.concatenate((seizure_labels, nonseizure_labels), axis=0)
+
+    # Shuffle the data
+    shuffled_indices = np.random.permutation(len(data))
+    data = data[shuffled_indices]
+
+    labels = labels[shuffled_indices]
+
+    # Create the training and validation sets
+    train_data = data[:int(train_percentage * len(data))]
+    train_labels = labels[:int(train_percentage * len(labels))]
+    val_data = data[int(train_percentage * len(data)):]
+    val_labels = labels[int(train_percentage * len(labels)):]
+
+    # Load the dataset
+    train_dataset = CustomDataset(train_data, train_labels)
+    val_dataset = CustomDataset(val_data, val_labels)
+
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=True)
+
+    return train_loader, val_loader
 
 
 if __name__ == "__main__":

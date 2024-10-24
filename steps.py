@@ -1,275 +1,250 @@
 import os
 import numpy as np
 import matplotlib.pyplot as plt
-from utils import notch_filter, butter_bandpass_filter
 from scipy.signal import welch, decimate
-import pickle
-from meegkit import dss
-from tqdm import tqdm
 from sklearn.preprocessing import RobustScaler
 from statsmodels.tsa.ar_model import AutoReg
+from meegkit import dss
+from tqdm import tqdm
+import pickle
+from typing import Tuple, Optional, List, Dict
+import logging
+
+# Set up logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 
-def init_examination(dataset, channelNumber, RESULT_FOLDER, start_time=-3, end_time=7):
-    '''
-    Function to initialize the examination of the seizure data,
-    This will plot the raw data, filtered data, bipolar montage, filtered bipolar montage,
-    and power spectral density of the raw data, filtered data, and filtered bipolar montage
-    :param dataset: sEEG .edf data
-    :param channelNumber: The channel number to be examined
-    :param RESULT_FOLDER: The folder to save the results
-    :param start_time: The start time of the examination window
-    :param end_time: The end time of the examination window
-    :return:
-    '''
-    eegData, timerange = dataset[:]
-    eegData = eegData.T * 1e6
-    samplingRate = int(dataset.info["sfreq"])
-    timeIndex = dataset.annotations.onset
-    seizureNumber = dataset.seizureNumber
-    channelName = dataset.ch_names[channelNumber]
+class EEGProcessor:
+    """Class for handling EEG data processing and visualization."""
 
-    print(f"Seizure {seizureNumber} Channel {channelName} is being examined...")
+    def __init__(self, sampling_rate: int = 2000):
+        self.sampling_rate = sampling_rate
 
-    # Find the index of timeIndex where it matches 'sz'
-    timeStartIndex = np.where(dataset.annotations.description == 'SZ')[0][0]
-    timeStartIndex = int(timeIndex[timeStartIndex] * samplingRate)
-    timeStartIndex = int(timeStartIndex + start_time * samplingRate)
-    timeEndIndex = int(timeStartIndex + end_time * samplingRate)
+    def plot_eeg_data(self, data: np.ndarray, timerange: np.ndarray,
+                      title: str, save_path: Optional[str] = None,
+                      ylim: Tuple[float, float] = (-400, 400)) -> None:
+        """Plot EEG data with consistent formatting."""
+        plt.figure(figsize=(12, 6))
+        plt.plot(timerange, data)
+        plt.vlines(0, ylim[0], ylim[1], color='r', linestyles='dashed',
+                   label='Seizure Start')
+        plt.title(title)
+        plt.legend()
+        if save_path:
+            plt.savefig(save_path)
+        plt.show()
+        plt.close()
 
-    # Get the first channel from 10 to 15 seconds
-    channel1 = eegData[timeStartIndex:timeEndIndex, channelNumber]
+    def compute_psd(self, data: np.ndarray, title: str,
+                    save_path: Optional[str] = None) -> None:
+        """Compute and plot power spectral density."""
+        nperseg = self.sampling_rate // 2
+        noverlap = nperseg // 4
+        f, Pxx = welch(data, fs=self.sampling_rate, nperseg=nperseg,
+                       noverlap=noverlap)
 
-    timerange = np.linspace(start_time - 1, end_time - 1, len(channel1))
-
-    plt.plot(timerange, channel1)
-    plt.vlines(0, -400, 400, color='r', linestyles='dashed', label='Seizure Start')
-    plt.title(f"Seizure {seizureNumber}_Channel {channelName} Raw")
-    plt.legend()
-    save_location = os.path.join(RESULT_FOLDER, f"{channelName}seizure_{seizureNumber}_raw.svg")
-    plt.savefig(save_location)
-    plt.show()
-
-    # Apply notch filter
-    channel1_filtered = notch_filter(channel1, fs=samplingRate, freq=60)
-
-    # Apply bandpass filter
-    channel1_filtered = butter_bandpass_filter(channel1_filtered, lowcut=0.5, highcut=70, fs=samplingRate)
-
-    plt.plot(timerange, channel1_filtered)
-    plt.vlines(0, -400, 400, color='r', linestyles='dashed', label='Seizure Start')
-    plt.title(f"Seizure {seizureNumber}_Channel {channelName} Filtered")
-    plt.legend()
-    save_location = os.path.join(RESULT_FOLDER, f"seizure_{seizureNumber}_filtered.svg")
-    plt.savefig(save_location)
-    plt.show()
-
-    # Bipolar montage
-    channel2 = eegData[timeStartIndex:timeEndIndex, channelNumber + 1]
-    bipolar = channel1 - channel2
-
-    plt.plot(timerange, bipolar)
-    plt.vlines(0, -200, 200, color='r', linestyles='dashed', label='Seizure Start')
-    plt.title(f"Seizure {seizureNumber}_{channelName}_Bipolar")
-    plt.legend()
-    save_location = os.path.join(RESULT_FOLDER, f"seizure_{seizureNumber}_bipolar.svg")
-    plt.savefig(save_location)
-    plt.show()
-
-    # Filter the bipolar montage
-    bipolar_filtered = notch_filter(bipolar, fs=samplingRate, freq=60)
-
-    bipolar_filtered = butter_bandpass_filter(bipolar_filtered, lowcut=0.5, highcut=70, fs=samplingRate)
-
-    plt.plot(timerange, bipolar_filtered)
-    plt.vlines(0, -200, 200, color='r', linestyles='dashed', label='Seizure Start')
-    plt.title(f"Seizure {seizureNumber}_{channelName}_Bipolar Filtered")
-    plt.legend()
-    save_location = os.path.join(RESULT_FOLDER, f"seizure_{seizureNumber}_bipolar_filtered.svg")
-    plt.savefig(save_location)
-    plt.show()
-
-    # Calculate the power spectral density
-    nperseg = samplingRate // 2
-    noverlap = nperseg // 4
-
-    f, Pxx = welch(channel1, fs=samplingRate, nperseg=nperseg, noverlap=noverlap)
-    plt.plot(f, Pxx)
-    plt.title(f"Seizure {seizureNumber}_Channel {channelName} Power Spectral Density")
-    plt.xlim(0, 100)
-    save_location = os.path.join(RESULT_FOLDER, f"seizure_{seizureNumber}_psd.png")
-    plt.savefig(save_location)
-    plt.show()
-
-    f, Pxx = welch(channel1_filtered, fs=samplingRate, nperseg=nperseg, noverlap=noverlap)
-    plt.plot(f, Pxx)
-    plt.xlim(0, 100)
-    plt.title(f"Seizure {seizureNumber}_Channel {channelName} Filtered Power Spectral Density")
-    save_location = os.path.join(RESULT_FOLDER, f"seizure_{seizureNumber}_filtered_psd.png")
-    plt.savefig(save_location)
-    plt.show()
-
-    f, Pxx = welch(bipolar_filtered, fs=samplingRate, nperseg=nperseg, noverlap=noverlap)
-    plt.plot(f, Pxx)
-    plt.xlim(0, 100)
-    plt.title(f"Seizure {seizureNumber}_{channelName}_Bipolar Filtered Power Spectral Density")
-    save_location = os.path.join(RESULT_FOLDER, f"seizure_{seizureNumber}_bipolar_filtered_psd.png")
-    plt.savefig(save_location)
-    plt.show()
+        plt.figure(figsize=(10, 6))
+        plt.plot(f, Pxx)
+        plt.title(title)
+        plt.xlim(0, 100)
+        if save_path:
+            plt.savefig(save_path)
+        plt.show()
+        plt.close()
 
 
-def preprocessing(dataset, DATA_FOLDER):
-    eegData = dataset.ictal
-    referenceData = dataset.interictal
-
-    eegData = eegData * 1e6
-    referenceData = referenceData * 1e6
-    samplingRate = dataset.samplingRate
-    postictalData = dataset.postictal
-
-    # Remove line noise from each electrode
-    cleanedData = remove_line_each_electrode(eegData, dataset.gridmap)
-    cleanedReferenceData = remove_line_each_electrode(referenceData, dataset.gridmap)
-    postictalData = remove_line_each_electrode(postictalData, dataset.gridmap)
-    #
-    # cleanedData = eegData
-    # cleanedReferenceData = referenceData
-
-    # Apply the bandpass filter
-    for i in range(cleanedData.shape[1]):
-        cleanedData[:, i] = butter_bandpass_filter(cleanedData[:, i], lowcut=1, highcut=127, fs=samplingRate)
-        cleanedReferenceData[:, i] = butter_bandpass_filter(cleanedReferenceData[:, i], lowcut=1, highcut=127, fs=samplingRate)
-        postictalData[:, i] = butter_bandpass_filter(postictalData[:, i], lowcut=1, highcut=127, fs=samplingRate)
-
-    try:
-        # Downsample the data to 128 Hz
-        cleanedData = decimate(cleanedData, samplingRate//128, axis=0)
-        cleanedReferenceData = decimate(cleanedReferenceData, samplingRate//128, axis=0)
-        postictalData = decimate(postictalData, samplingRate//128, axis=0)
-        dataset.downsample = True
-        dataset.samplingRate = 128
-    except Exception as e:
-        print(f"Cannot downsample the data: {e}")
-
-    try:
-        # Apply whitening using autoregressive model
-        cleanedData = apply_whitening(cleanedData, lags=1)
-        cleanedReferenceData = apply_whitening(cleanedReferenceData, lags=1)
-        cleanedPostictalData = apply_whitening(postictalData, lags=1)
-        dataset.whitening = True
-    except Exception as e:
-        print(f"Cannot apply whitening to the data: {e}")
-
-    try:
-        # Normalize the data
-        cleanedData = normalize_signal(cleanedData, cleanedReferenceData)
-        cleanedPostictalData = normalize_signal(cleanedPostictalData, cleanedReferenceData)
-    except Exception as e:
-        print(f"Cannot normalize the data: {e}")
-
-    # Store cleaned data
-    save_location = os.path.join(DATA_FOLDER, f"seizure_{dataset.seizureNumber}_CLEANED.pkl")
-    dataset.ictal = cleanedData
-    dataset.interictal = cleanedReferenceData
-    dataset.postictal = cleanedPostictalData
-    pickle.dump(dataset, open(save_location, "wb"))
-    print("Data saved to: ", save_location)
-
-    print(f"Preprocessing of seizure {dataset.seizureNumber} is complete.")
-
-    return dataset
-
-
-def normalize_signal(signal, reference):
+def init_examination(dataset, channel_number: int, result_folder: str,
+                     start_time: float = -3, end_time: float = 7) -> None:
     """
-    Normalize the signal using RobustScaler based on interictal data.
+    Initialize examination of seizure data with comprehensive visualization.
+
     Args:
-        signal (numpy array): The input signal to be normalized.
-        interictal_data (numpy array): Interictal data used for normalization.
-    Returns:
-        numpy array: The normalized signal.
+        dataset: sEEG .edf dataset
+        channel_number: Channel number to examine
+        result_folder: Folder to save results
+        start_time: Start time of examination window
+        end_time: End time of examination window
     """
+    try:
+        os.makedirs(result_folder, exist_ok=True)
+        processor = EEGProcessor(int(dataset.info["sfreq"]))
 
-    for i in range(signal.shape[1]):
-        scaler = RobustScaler()
-        scaler.fit(reference[:, i].reshape(-1, 1))
-        normalized_signal = scaler.transform(signal[:, i].reshape(-1, 1)).squeeze()
-        signal[:, i] = normalized_signal
+        # Extract data
+        eeg_data, _ = dataset[:]
+        eeg_data = eeg_data.T * 1e6
+        channel_name = dataset.ch_names[channel_number]
 
-    return signal
+        # Calculate indices
+        time_start_idx = int(dataset.annotations.onset[
+                                 np.where(dataset.annotations.description == 'SZ')[0][0]] *
+                             processor.sampling_rate)
+        time_start_idx = int(time_start_idx + start_time * processor.sampling_rate)
+        time_end_idx = int(time_start_idx + end_time * processor.sampling_rate)
 
+        # Extract channels
+        channel1 = eeg_data[time_start_idx:time_end_idx, channel_number]
+        channel2 = eeg_data[time_start_idx:time_end_idx, channel_number + 1]
+        timerange = np.linspace(start_time - 1, end_time - 1, len(channel1))
 
-def apply_whitening(data, lags=1):
-    '''
-    Apply whitening to an array of signals using auto-regressive model
-    :param data: 2D numpy array of shape (n_samples, n_signals) or 1D array
-    :param lags: Number of lags for the autoregressive model
-    :return: Whitened data with the same shape as input
-    '''
-    # Ensure the input is a numpy array
-    data = np.asarray(data)
+        # Process and plot data
+        plots = [
+            ("raw", channel1),
+            ("filtered", process_channel(channel1, processor.sampling_rate)),
+            ("bipolar", channel1 - channel2),
+            ("bipolar_filtered", process_channel(channel1 - channel2,
+                                                 processor.sampling_rate))
+        ]
 
-    # Check if input is 1D or 2D
-    if data.ndim == 1:
-        data = data.reshape(-1, 1)
-    elif data.ndim > 2:
-        raise ValueError("Input data must be 1D or 2D array")
+        for plot_type, data in plots:
+            save_path = os.path.join(
+                result_folder,
+                f"seizure_{dataset.seizureNumber}_{channel_name}_{plot_type}.svg"
+            )
+            processor.plot_eeg_data(
+                data, timerange,
+                f"Seizure {dataset.seizureNumber}_Channel {channel_name} {plot_type.title()}",
+                save_path
+            )
 
-    n_samples, n_signals = data.shape
-    whitened_data = np.zeros_like(data)
+            # Compute PSD for each type
+            psd_save_path = os.path.join(
+                result_folder,
+                f"seizure_{dataset.seizureNumber}_{plot_type}_psd.png"
+            )
+            processor.compute_psd(
+                data,
+                f"Seizure {dataset.seizureNumber}_{channel_name}_{plot_type} PSD",
+                psd_save_path
+            )
 
-    for i in tqdm(range(n_signals), desc="Whitening signals"):
-        signal = data[:, i]
-
-        # Fit the AutoReg model
-        model = AutoReg(signal, lags=lags)
-        model_fitted = model.fit()
-
-        # Generate predictions
-        predictions = model_fitted.predict(start=lags, end=n_samples - 1)
-
-        # Compute the whitened signal
-        whitened_signal = np.zeros_like(signal)
-        whitened_signal[lags:] = signal[lags:] - predictions
-
-        # Handle the first 'lags' elements
-        whitened_signal[:lags] = signal[:lags] - np.mean(signal)
-
-        whitened_data[:, i] = whitened_signal
-
-    # If input was 1D, return 1D output
-    if data.shape[1] == 1:
-        whitened_data = whitened_data.squeeze()
-
-    return whitened_data
-
-
-def remove_line_each_electrode(data, ele):
-    '''
-    Remove line noise from each electrode
-    :param data: Data
-    :param ele: Electrode
-    :return: Data after removing line noise
-    '''
-    for e in tqdm(ele['Channel']):
-        start, end = map(int, e.split(':'))
-        data[:, start:end+1] = remove_line(data[:, start:end+1], [60, 100])
-    return data
+    except Exception as e:
+        logger.error(f"Error in init_examination: {str(e)}")
+        raise
 
 
-def remove_line(x1, lineF, Fs=2000):
-    '''
-
-    :param x1:
-    :param lineF:
-    :param Fs:
-    :return:
-    '''
-    print("Start Line noise removal")
-    xret = np.array(x1)
-    for f0 in lineF:
-        xret, _ = dss.dss_line_iter(xret, f0, Fs)
-    print("Removal Line noise removal Complete")
-    return xret
+def process_channel(data: np.ndarray, fs: int) -> np.ndarray:
+    """Process single channel with filtering."""
+    from utils import notch_filter, butter_bandpass_filter
+    data = notch_filter(data, fs=fs, freq=60)
+    return butter_bandpass_filter(data, lowcut=0.5, highcut=70, fs=fs)
 
 
+class SignalProcessor:
+    """Class for signal processing operations."""
+
+    @staticmethod
+    def normalize_signal(signal: np.ndarray, reference: np.ndarray) -> np.ndarray:
+        """Normalize signal using RobustScaler."""
+        normalized = np.zeros_like(signal)
+        for i in range(signal.shape[1]):
+            scaler = RobustScaler()
+            scaler.fit(reference[:, i].reshape(-1, 1))
+            normalized[:, i] = scaler.transform(
+                signal[:, i].reshape(-1, 1)
+            ).squeeze()
+        return normalized
+
+    @staticmethod
+    def apply_whitening(data: np.ndarray, lags: int = 1) -> np.ndarray:
+        """Apply whitening using auto-regressive model."""
+        data = np.asarray(data)
+        if data.ndim == 1:
+            data = data.reshape(-1, 1)
+        elif data.ndim > 2:
+            raise ValueError("Input data must be 1D or 2D array")
+
+        whitened = np.zeros_like(data)
+        for i in tqdm(range(data.shape[1]), desc="Whitening signals"):
+            signal = data[:, i]
+            model = AutoReg(signal, lags=lags).fit()
+            predictions = model.predict(start=lags, end=len(signal) - 1)
+
+            whitened[lags:, i] = signal[lags:] - predictions
+            whitened[:lags, i] = signal[:lags] - np.mean(signal)
+
+        return whitened.squeeze() if data.shape[1] == 1 else whitened
+
+    @staticmethod
+    def remove_line_noise(data: np.ndarray,
+                          gridmap: Dict,
+                          line_freqs: List[float] = [60, 100],
+                          fs: int = 2000) -> np.ndarray:
+        """Remove line noise from each electrode."""
+        cleaned_data = np.array(data)
+        for e in tqdm(gridmap['Channel'], desc="Removing line noise"):
+            start, end = map(int, e.split(':'))
+            section = cleaned_data[:, start:end + 1]
+            for f0 in line_freqs:
+                section, _ = dss.dss_line_iter(section, f0, fs)
+            cleaned_data[:, start:end + 1] = section
+        return cleaned_data
+
+
+def preprocessing(dataset, data_folder: str):
+    """Preprocess EEG dataset with comprehensive cleaning and normalization."""
+    try:
+        processor = SignalProcessor()
+
+        # Load and scale data
+        data_dict = {
+            'ictal': dataset.ictal,
+            'interictal': dataset.interictal,
+            'postictal': dataset.postictal,
+            'preictal2': dataset.preictal2,
+            'postictal2': dataset.postictal2
+        }
+
+        # Scale data
+        for key in data_dict:
+            data_dict[key] = data_dict[key] * 1e6
+
+        # Remove line noise
+        for key in data_dict:
+            data_dict[key] = processor.remove_line_noise(
+                data_dict[key], dataset.gridmap
+            )
+
+        # Apply bandpass filter
+        for key in data_dict:
+            for i in range(data_dict[key].shape[1]):
+                data_dict[key][:, i] = process_channel(
+                    data_dict[key][:, i], dataset.samplingRate
+                )
+
+        # Downsample
+        try:
+            factor = dataset.samplingRate // 128
+            for key in data_dict:
+                data_dict[key] = decimate(data_dict[key], factor, axis=0)
+            dataset.downsample = True
+            dataset.samplingRate = 128
+        except Exception as e:
+            logger.warning(f"Downsampling failed: {str(e)}")
+
+        # Apply whitening and normalization
+        try:
+            for key in data_dict:
+                data_dict[key] = processor.apply_whitening(data_dict[key])
+                data_dict[key] = processor.normalize_signal(
+                    data_dict[key], data_dict['interictal']
+                )
+        except Exception as e:
+            logger.warning(f"Whitening/normalization failed: {str(e)}")
+
+        # Save processed data
+        for key in data_dict:
+            setattr(dataset, key, data_dict[key])
+
+        save_path = os.path.join(
+            data_folder, f"seizure_{dataset.seizureNumber}_CLEANED.pkl"
+        )
+        with open(save_path, 'wb') as f:
+            pickle.dump(dataset, f)
+        logger.info(f"Data saved to: {save_path}")
+
+        return dataset
+
+    except Exception as e:
+        logger.error(f"Preprocessing failed: {str(e)}")
+        raise

@@ -131,14 +131,45 @@ def find_seizure_annotations(raw):
     # Return the first occurrence of each
     return SZON_indices[0], SZOFF_indices[0]
 
-def split_data(data, fs):
-    '''
-    Function to split data into chunks of size fs
-    :param data:
-    :param fs:
-    :return:
-    '''
-    data = data[:int(len(data) / fs) * fs]
-    data = np.array(np.split(data, len(data) / fs))
 
-    return data
+def split_data(data, fs, overlap=0):
+    '''
+    Function to split 2D data into chunks of size fs with specified overlap
+
+    Parameters:
+    -----------
+    data : numpy.ndarray
+        Input 2D data to be split, shape (samples, features)
+    fs : int
+        Window size (number of samples per chunk)
+    overlap : float
+        Overlap between consecutive windows (0 to 1), default is 0
+        e.g., 0.5 means 50% overlap
+
+    Returns:
+    --------
+    numpy.ndarray
+        Array of overlapped chunks with shape (n_chunks, fs, n_features)
+    '''
+    if not 0 <= overlap < 1:
+        raise ValueError("Overlap must be between 0 and 1")
+
+    # Calculate step size based on overlap
+    step = int(fs * (1 - overlap))
+
+    # Calculate number of chunks
+    n_chunks = ((len(data) - fs) // step) + 1
+
+    # Get the number of features (columns) in the data
+    n_features = data.shape[1]
+
+    # Prepare output array with correct shape
+    chunks = np.zeros((n_chunks, fs, n_features))
+
+    # Fill chunks using sliding window
+    for i in range(n_chunks):
+        start_idx = i * step
+        end_idx = start_idx + fs
+        chunks[i] = data[start_idx:end_idx, :]
+
+    return chunks
