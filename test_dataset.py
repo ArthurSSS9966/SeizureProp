@@ -72,11 +72,46 @@ if __name__ == "__main__":
     dataloader = DataLoader(dataset, batch_size=32, shuffle=True)
     valdataloader = DataLoader(valdataset, batch_size=32, shuffle=True)
 
-    # Create the model
-    model1 = CNN1D(input_dim=channels, kernel_size=time_steps, output_dim=2)
-    model2 = Wavenet(input_dim=channels, output_dim=2, kernel_size=time_steps)
-    model3 = LSTM(input_dim=channels, output_dim=2)
+    model1 = CNN1D(input_dim=channels, kernel_size=time_steps, output_dim=2, lr=0.001)
+    model2 = Wavenet(input_dim=channels, output_dim=2, kernel_size=time_steps, lr=0.001)
+    model3 = LSTM(input_dim=channels, output_dim=2, lr=0.001)
+
+    epochs = 20
+    checkpoint_freq = 5
 
     # Train the model
-    train_using_optimizer(model2, dataloader, valdataloader, MODEL_FOLDER)
+    CNNtrain_loss, CNNval_los, CNNval_accuracy = train_using_optimizer(
+        model=model1,
+        trainloader=dataloader,
+        valloader=valdataloader,
+        save_location='checkpoints',
+        epochs=epochs,
+        device='cuda:0',
+        patience=7,
+        gradient_clip=1.0,
+        checkpoint_freq=checkpoint_freq
+    )
+
+    Wavetrain_loss, Waveval_los, Waveval_accuracy = train_using_optimizer(
+        model=model2,
+        trainloader=dataloader,
+        valloader=valdataloader,
+        save_location='checkpoints',
+        epochs=epochs,
+        device='cuda:0',
+        patience=7,
+        gradient_clip=1.0,
+        checkpoint_freq=checkpoint_freq
+    )
+    LSTMtrain_loss, LSTMval_los, LSTMval_accuracy = train_using_optimizer(
+        model=model3,
+        trainloader=dataloader,
+        valloader=valdataloader,
+        save_location='checkpoints',
+        epochs=epochs,
+        device='cuda:0',
+        patience=7,
+        gradient_clip=1.0,
+        checkpoint_freq=checkpoint_freq
+    )
 
