@@ -55,7 +55,7 @@ class BaseModel(nn.Module):
 
 class LSTM(BaseModel):
     def __init__(self, input_dim: int, output_dim: int,
-                 lr = 0.01, weight_decay = 1e-5,
+                 lr = 0.001, weight_decay=1e-5,
                  hidden_dim: int = 50, dropout: float = 0.2,
                  num_layers: int = 1, device: str = 'cuda:0'):
         super().__init__(input_dim, output_dim, device)
@@ -102,7 +102,7 @@ class LSTM(BaseModel):
 
 class CNN1D(BaseModel):
     def __init__(self, input_dim: int, output_dim: int,
-                 lr=0.01, weight_decay=1e-5,
+                 lr=0.001, weight_decay=1e-5,
                  hidden_dim: int = 128, dropout: float = 0.2,
                  kernel_size: int = 256, device: str = 'cuda:0'):
         super().__init__(input_dim, output_dim, device)

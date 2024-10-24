@@ -13,7 +13,7 @@ MODEL_FOLDER = "model"
 PAT_NO = 66
 
 
-def train_test(model, PAT_NO, data_folder, TRAIN=True, epochs=200):
+def train_test(model, PAT_NO, data_folder, TRAIN=True, epochs=10):
     # Load the data
     data_folder = os.path.join(data_folder, f"P{PAT_NO}")
     seizure = load_seizure(data_folder)
@@ -24,7 +24,7 @@ def train_test(model, PAT_NO, data_folder, TRAIN=True, epochs=200):
     _, channels, time_steps = train_loader.dataset[0][0].shape
 
     # Create the model
-    model1 = model(input_dim=channels, kernel_size=time_steps, output_dim=2)
+    model1 = model(input_dim=channels, kernel_size=time_steps, output_dim=2, lr=0.001, dropout=0.2)
 
     if TRAIN:
 
@@ -38,7 +38,7 @@ def train_test(model, PAT_NO, data_folder, TRAIN=True, epochs=200):
 
     val_loss, val_accuracy = evaluate_model(model1, val_loader)
 
-    return train_loss, val_los, val_accuracy
+    return train_loss, val_loss, val_accuracy
 
 # def validate_on_seizure(model, PAT_NO, seizure_NO):
 

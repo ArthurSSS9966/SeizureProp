@@ -9,6 +9,7 @@ import torch
 from utils import process_edf_channels_and_create_new_gridmap, find_seizure_annotations
 from utils import split_data
 from torch.utils.data import DataLoader
+from sklearn.model_selection import StratifiedShuffleSplit
 
 def constructDataset(data):
     '''
@@ -262,7 +263,7 @@ def load_single_seizure(path, seizure_number):
     return raw
 
 
-def create_dataset(seizure, train_percentage=0.8, batch_size=32):
+def create_dataset(seizure, train_percentage=0.8, batch_size=512):
 
     seizure_data = seizure.ictal
     nonseizure_data = seizure.interictal
@@ -292,11 +293,22 @@ def create_dataset(seizure, train_percentage=0.8, batch_size=32):
 
     labels = labels[shuffled_indices]
 
-    # Create the training and validation sets
-    train_data = data[:int(train_percentage * len(data))]
-    train_labels = labels[:int(train_percentage * len(labels))]
-    val_data = data[int(train_percentage * len(data)):]
-    val_labels = labels[int(train_percentage * len(labels)):]
+    # Create a subset of the data for balanced dataset
+    seizure_indices = np.where(labels == 1)[0]
+    nonseizure_indices = np.where(labels == 0)[0]
+
+    n_samples = min(len(seizure_indices), len(nonseizure_indices))
+    seizure_indices = np.random.choice(seizure_indices, n_samples, replace=False)
+    nonseizure_indices = np.random.choice(nonseizure_indices, n_samples, replace=False)
+
+    data = np.concatenate((data[seizure_indices], data[nonseizure_indices]), axis=0)
+    labels = np.concatenate((labels[seizure_indices], labels[nonseizure_indices]), axis=0)
+    # Use stratified sampling to create the training and validation sets
+
+    sss = StratifiedShuffleSplit(n_splits=1, test_size=1 - train_percentage, random_state=0)
+    for train_index, val_index in sss.split(data, labels):
+        train_data, val_data = data[train_index], data[val_index]
+        train_labels, val_labels = labels[train_index], labels[val_index]
 
     # Load the dataset
     train_dataset = CustomDataset(train_data, train_labels)
