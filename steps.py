@@ -10,6 +10,8 @@ import pickle
 from typing import Tuple, Optional, List, Dict
 import logging
 
+from utils import butter_bandpass_filter
+
 # Set up logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -125,9 +127,7 @@ def init_examination(dataset, channel_number: int, result_folder: str,
 
 def process_channel(data: np.ndarray, fs: int) -> np.ndarray:
     """Process single channel with filtering."""
-    from utils import notch_filter, butter_bandpass_filter
-    data = notch_filter(data, fs=fs, freq=60)
-    return butter_bandpass_filter(data, lowcut=0.5, highcut=70, fs=fs)
+    return butter_bandpass_filter(data, lowcut=1, highcut=127, fs=fs)
 
 
 class SignalProcessor:
@@ -189,10 +189,10 @@ def preprocessing(dataset, data_folder: str):
         # Load and scale data
         data_dict = {
             'ictal': dataset.ictal,
-            'interictal': dataset.interictal,
             'postictal': dataset.postictal,
             'preictal2': dataset.preictal2,
-            'postictal2': dataset.postictal2
+            'postictal2': dataset.postictal2,
+            'interictal': dataset.interictal,
         }
 
         # Scale data
@@ -208,8 +208,8 @@ def preprocessing(dataset, data_folder: str):
         # Apply bandpass filter
         for key in data_dict:
             for i in range(data_dict[key].shape[1]):
-                data_dict[key][:, i] = process_channel(
-                    data_dict[key][:, i], dataset.samplingRate
+                data_dict[key][:, i] = butter_bandpass_filter(
+                    data_dict[key][:, i], lowcut=1, highcut=127, fs=dataset.samplingRate
                 )
 
         # Downsample

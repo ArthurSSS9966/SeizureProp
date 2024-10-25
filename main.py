@@ -50,7 +50,7 @@ if __name__ == "__main__":
 
     for datafile in os.listdir(datafiles):
         datafile = os.path.join(datafiles, datafile)
-        if datafile.endswith(".pkl"):
+        if (datafile.endswith(".pkl") and not datafile.endswith("_CLEANED.pkl")):
             dataset = pickle.load(open(datafile, "rb"))
 
             # init_examination(dataset, 20, RESULT_FOLDER, start_time=-3, end_time=7)

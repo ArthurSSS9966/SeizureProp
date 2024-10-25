@@ -230,8 +230,13 @@ def load_seizure(path):
         raw.ictal = split_data(raw.ictal, raw.samplingRate)
         raw.postictal = split_data(raw.postictal, raw.samplingRate)
 
+
         if seizure_data_combined.patNo is None:
             seizure_data_combined = raw
+            seizure_data_combined.interictal = np.concatenate((seizure_data_combined.interictal,
+                                                               split_data(raw.preictal2, raw.samplingRate)), axis=0)
+            seizure_data_combined.postictal = np.concatenate((seizure_data_combined.postictal,
+                                                                split_data(raw.postictal2, raw.samplingRate)), axis=0)
         else:
             seizure_data_combined.ictal = np.vstack((seizure_data_combined.ictal, raw.ictal))
             seizure_data_combined.interictal = np.vstack((seizure_data_combined.interictal, raw.interictal))
