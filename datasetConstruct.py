@@ -8,7 +8,7 @@ from torch.utils.data import Dataset
 import torch
 from utils import process_edf_channels_and_create_new_gridmap, find_seizure_annotations
 from utils import split_data
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, ConcatDataset
 from sklearn.model_selection import StratifiedShuffleSplit
 
 def constructDataset(data):
@@ -141,10 +141,11 @@ def reconsEDF(raw, gridmap, PAT_NO):
     # Define the preictal range
     preictal_range = int(60*raw.info["sfreq"])  # 60 seconds before EOF and after SOF, also 60 seconds before Seizure
     pre_range = int(10*raw.info["sfreq"])  # 10 seconds before EOF and after SOF, also 10 seconds before Seizure
+    postictal_range = int(np.min([60*raw.info["sfreq"], data.shape[0] - SZOFF_time]))  # 60 seconds after EOF and before SOF
 
     # Extract the preictal and ictal data
     preictal_data = data[:preictal_range, :]
-    postictal_data = data[-preictal_range:, :]
+    postictal_data = data[postictal_range:, :]
     ictal_data = data[SZ_time:SZOFF_time, :]
     preictal_data2 = data[SZ_time-pre_range:SZ_time, :]
     postictal_data2 = data[SZOFF_time:SZOFF_time+pre_range, :]
@@ -174,6 +175,9 @@ def reconsEDF(raw, gridmap, PAT_NO):
 
 class EDFData:
     def __init__(self, gridmap, seizureNumber, patNo):
+        self.samplingRate = None
+        self.preictal2 = None
+        self.ictal = None
         self.gridmap = gridmap
         self.seizureNumber = seizureNumber
         self.patNo = patNo
@@ -229,23 +233,36 @@ def load_seizure(path):
         raw.interictal = split_data(raw.interictal, raw.samplingRate)
         raw.ictal = split_data(raw.ictal, raw.samplingRate)
         raw.postictal = split_data(raw.postictal, raw.samplingRate)
-
+        raw.preictal2 = split_data(raw.preictal2, raw.samplingRate)
+        raw.postictal2 = split_data(raw.postictal2, raw.samplingRate)
 
         if seizure_data_combined.patNo is None:
             seizure_data_combined = raw
             seizure_data_combined.interictal = np.concatenate((seizure_data_combined.interictal,
-                                                               split_data(raw.preictal2, raw.samplingRate)), axis=0)
+                                                               raw.preictal2), axis=0)
             seizure_data_combined.postictal = np.concatenate((seizure_data_combined.postictal,
-                                                                split_data(raw.postictal2, raw.samplingRate)), axis=0)
+                                                                raw.postictal2), axis=0)
         else:
             seizure_data_combined.ictal = np.vstack((seizure_data_combined.ictal, raw.ictal))
-            seizure_data_combined.interictal = np.vstack((seizure_data_combined.interictal, raw.interictal))
-            seizure_data_combined.postictal = np.vstack((seizure_data_combined.postictal, raw.postictal))
+            seizure_data_combined.interictal = np.vstack((seizure_data_combined.interictal, raw.interictal, raw.preictal2))
+            seizure_data_combined.postictal = np.vstack((seizure_data_combined.postictal, raw.postictal, raw.postictal2))
 
         seizure_data_combined.seizureNumber = 'All'
 
     return seizure_data_combined
 
+def load_seizure_across_patients(data_folder):
+
+    seizure_data_combined = []
+
+    for folder in os.listdir(data_folder):
+        # if not a folder
+        if not os.path.isdir(os.path.join(data_folder, folder)):
+            continue
+        seizure_single = load_seizure(os.path.join(data_folder, folder))
+        seizure_data_combined.append(seizure_single)
+
+    return seizure_data_combined
 
 def load_single_seizure(path, seizure_number):
     """
@@ -325,10 +342,36 @@ def create_dataset(seizure, train_percentage=0.8, batch_size=512):
     return train_loader, val_loader
 
 
+def combine_loaders(loader_list, batch_size=512):
+    # Extract datasets from DataLoaders
+    train_datasets = [loader[0].dataset for loader in loader_list]  # Get datasets from training DataLoaders
+    val_datasets = [loader[1].dataset for loader in loader_list]  # Get datasets from validation DataLoaders
+
+    # Combine training datasets
+    combined_train = ConcatDataset(train_datasets)
+    # Combine validation datasets
+    combined_val = ConcatDataset(val_datasets)
+
+    # Create new loaders
+    train_loader = DataLoader(
+        dataset=combined_train,
+        batch_size=batch_size,  # Adjust as needed
+        shuffle=True
+    )
+
+    val_loader = DataLoader(
+        dataset=combined_val,
+        batch_size=batch_size,  # Adjust as needed
+        shuffle=False  # Usually False for validation
+    )
+
+    return train_loader, val_loader
+
+
 if __name__ == "__main__":
     DATA_FOLDER = "D:/Blcdata/seizure"
     OUTPUT_FOLDER = "data"
-    PAT_NO = 66
+    PAT_NO = 65
 
     # Load the data
     data_folder = os.path.join(DATA_FOLDER, "P0{:02d}".format(PAT_NO))

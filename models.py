@@ -1,10 +1,9 @@
-import os
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 import torch
 import itertools
-from typing import Tuple, List, Optional, Dict
+from typing import Tuple, List, Optional
 from pathlib import Path
 from tqdm import tqdm
 import numpy as np
@@ -14,7 +13,6 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-# Define LSTM model
 class BaseModel(nn.Module):
     """Base class for all models with common functionality."""
 

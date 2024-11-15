@@ -173,3 +173,137 @@ def split_data(data, fs, overlap=0):
         chunks[i] = data[start_idx:end_idx, :]
 
     return chunks
+
+def parse_channel_string(channel_str):
+    # Split the string by commas and strip whitespace
+    channel_groups = [group.strip() for group in channel_str.split(',')]
+
+    # Initialize list for all channels
+    all_channels = []
+
+    for group in channel_groups:
+        # Split into prefix and range
+        prefix = ''.join(c for c in group if not c.isdigit() and c != '-')
+        # Get the range part
+        range_part = group[len(prefix):]
+
+        if '-' in range_part:
+            # Get start and end numbers
+            start, end = map(int, range_part.split('-'))
+            # Generate all channel numbers in range
+            for num in range(start, end + 1):
+                all_channels.append(f"{prefix}{num}")
+        else:
+            # Single channel case
+            all_channels.append(group)
+
+    return all_channels
+
+
+def find_seizure_channels(seizure_marking: pd.DataFrame, seizure_no: int, patient_no: int) -> list:
+    """
+    Find the channels that have seizure marking for a given seizure number
+
+    Args:
+    seizure_marking (pd.DataFrame): The seizure marking dataframe
+    seizure_no (int): The seizure number
+    seizure_no (int): The patient number
+
+    Returns:
+    list: The list of channels that have seizure marking
+    """
+
+    patient_marking = seizure_marking[seizure_marking['ID'] == patient_no]
+    seizures = patient_marking[patient_marking['Seizure'] == seizure_no]
+
+    channels = parse_channel_string(seizures['Seizure channels'].values[0])
+
+    return channels
+
+
+def find_seizure_onset(seizure_marking: pd.DataFrame, seizure_no: int, patient_no: int) -> list:
+    """
+    Find the seizure onset time for a given seizure number
+
+    Args:
+    seizure_marking (pd.DataFrame): The seizure marking dataframe
+    seizure_no (int): The seizure number
+    seizure_no (int): The patient number
+
+    Returns:
+    float: The seizure onset time
+    """
+    patient_marking = seizure_marking[seizure_marking['ID'] == patient_no]
+    seizure_marking = patient_marking[patient_marking['Seizure'] == seizure_no]
+
+    onset_time = seizure_marking['Seizure onset (1st second)'].values[0]
+
+    return parse_channel_string(onset_time)
+
+def find_seizure_related_channels(seizure_marking: pd.DataFrame, seizure_no: int, patient_no: int):
+    """
+    Find the channels that have seizure marking for a given seizure number
+
+    Args:
+    seizure_marking (pd.DataFrame): The seizure marking dataframe
+    seizure_no (int): The seizure number
+    seizure_no (int): The patient number
+
+    Returns:
+    list: The list of channels that have seizure marking
+    """
+
+    seizure_channels = find_seizure_channels(seizure_marking, seizure_no, patient_no)
+    seizure_onset = find_seizure_onset(seizure_marking, seizure_no, patient_no)
+
+    return seizure_channels, seizure_onset
+
+
+def create_channel_mapping(gridmap_df):
+    """
+    Creates a dictionary mapping channel numbers to channel names
+
+    Args:
+        gridmap_df: DataFrame containing gridmap information with columns
+                   'Label' and 'Channel'
+
+    Returns:
+        dict: Mapping of channel numbers to channel names
+    """
+    channel_map = {}
+
+    for _, row in gridmap_df.iterrows():
+        label = row['Label']
+        # Convert channel range string (e.g., "1:8") to list of integers
+        chan_range = [int(x) for x in row['Channel'].split(':')]
+        # Convert electrode range string to list of integers
+        elec_range = [int(x) for x in row['GridElectrode'].split(':')]
+
+        # Create mapping for each channel in the range
+        for chan, elec in zip(range(chan_range[0], chan_range[1] + 1),
+                              range(elec_range[0], elec_range[1] + 1)):
+            channel_map[chan] = f"{label}{elec}"
+
+    return channel_map
+
+
+def map_seizure_channels(channel_numbers, gridmap) -> list:
+    """
+    Maps channel numbers to channel names
+
+    Args:
+        channel_numbers: List or array of channel numbers
+        channel_map: Dictionary mapping channel numbers to names
+
+    Returns:
+        pandas.DataFrame: DataFrame with both channel numbers and names
+    """
+    channel_map = create_channel_mapping(gridmap)
+
+    # Convert input to numpy array if it isn't already
+    channel_numbers = np.array(channel_numbers)
+
+    # Create channel names list
+    channel_names = [channel_map.get(num, f"Unknown_{num}") for num in channel_numbers]
+
+    return channel_names
