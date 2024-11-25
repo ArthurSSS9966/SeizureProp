@@ -261,16 +261,17 @@ def find_seizure_related_channels(seizure_marking: pd.DataFrame, seizure_no: int
 
 def create_channel_mapping(gridmap_df):
     """
-    Creates a dictionary mapping channel numbers to channel names
+    Creates bidirectional dictionaries mapping channel numbers to names and vice versa
 
     Args:
         gridmap_df: DataFrame containing gridmap information with columns
                    'Label' and 'Channel'
 
     Returns:
-        dict: Mapping of channel numbers to channel names
+        tuple: (num_to_name, name_to_num) dictionaries for bidirectional mapping
     """
-    channel_map = {}
+    num_to_name = {}
+    name_to_num = {}
 
     for _, row in gridmap_df.iterrows():
         label = row['Label']
@@ -282,28 +283,73 @@ def create_channel_mapping(gridmap_df):
         # Create mapping for each channel in the range
         for chan, elec in zip(range(chan_range[0], chan_range[1] + 1),
                               range(elec_range[0], elec_range[1] + 1)):
-            channel_map[chan] = f"{label}{elec}"
+            channel_name = f"{label}{elec}"
+            num_to_name[chan] = channel_name
+            name_to_num[channel_name] = chan
 
-    return channel_map
+    return num_to_name, name_to_num
 
 
-def map_seizure_channels(channel_numbers, gridmap) -> list:
+def map_seizure_channels(channels, gridmap, mode='num_to_name'):
     """
-    Maps channel numbers to channel names
+    Maps between channel numbers and channel names
 
     Args:
-        channel_numbers: List or array of channel numbers
-        channel_map: Dictionary mapping channel numbers to names
+        channels: List of channel numbers or names
+        gridmap: DataFrame with gridmap information
+        mode: 'num_to_name' to convert numbers to names,
+              'name_to_num' to convert names to numbers
 
     Returns:
-        pandas.DataFrame: DataFrame with both channel numbers and names
+        list: Mapped channel names or numbers
     """
-    channel_map = create_channel_mapping(gridmap)
+    num_to_name, name_to_num = create_channel_mapping(gridmap)
 
-    # Convert input to numpy array if it isn't already
-    channel_numbers = np.array(channel_numbers)
+    # Convert input to list if it's not already
+    channels = list(channels)
 
-    # Create channel names list
-    channel_names = [channel_map.get(num, f"Unknown_{num}") for num in channel_numbers]
+    if mode == 'num_to_name':
+        mapping_dict = num_to_name
+        unknown_format = "Unknown_{}"
+    else:  # name_to_num
+        mapping_dict = name_to_num
+        unknown_format = -1  # Use -1 for unknown channel names
 
-    return channel_names
+    # Map channels using appropriate dictionary
+    mapped_channels = [mapping_dict.get(chan, unknown_format.format(chan) if mode == 'num_to_name' else unknown_format)
+                       for chan in channels]
+
+    return mapped_channels
+
+def map_channels_to_numbers(channel_numbers, channel_names, selected_channels):
+    """
+    Maps selected channel names to their corresponding channel numbers, ignoring case.
+
+    Parameters:
+    channel_numbers (list): List of channel numbers
+    channel_names (list): List of channel names corresponding to the numbers
+    selected_channels (list): List of channel names to map back to numbers
+
+    Returns:
+    list: Channel numbers corresponding to the selected channel names
+
+    Raises:
+    ValueError: If channel_numbers and channel_names have different lengths
+    ValueError: If a selected channel name is not found in channel_names
+    """
+    # Verify input lists have same length
+    if len(channel_numbers) != len(channel_names):
+        raise ValueError("Channel numbers and names lists must have the same length")
+
+    # Create a dictionary mapping lowercase names to numbers
+    channel_map = {name.lower(): num for name, num in zip(channel_names, channel_numbers)}
+
+    # Map selected channels to numbers
+    selected_numbers = []
+    for channel in selected_channels:
+        channel_lower = channel.lower()
+        if channel_lower not in channel_map:
+            raise ValueError(f"Channel name '{channel}' not found in channel_names")
+        selected_numbers.append(channel_map[channel_lower])
+
+    return selected_numbers

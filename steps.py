@@ -14,12 +14,13 @@ import torch
 import json
 import datetime
 
-from utils import butter_bandpass_filter,split_data, map_seizure_channels, find_seizure_related_channels
+from utils import (butter_bandpass_filter,split_data, map_seizure_channels,
+                   find_seizure_related_channels, map_channels_to_numbers)
 from plotFun import plot_time_limited_heatmap, plot_eeg_style
 from datasetConstruct import (combine_loaders,
                               load_seizure_across_patients, create_dataset,
                               EDFData, load_single_seizure)
-from models import train_using_optimizer, evaluate_model, output_to_probability, Wavenet, CNN1D, LSTM
+from models import train_using_optimizer, evaluate_model, output_to_probability, Wavenet, CNN1D, LSTM, Wavenet2
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -284,7 +285,8 @@ def setup_and_train_models(
     AVAILABLE_MODELS = {
         'CNN1D': lambda ch, ts, lr: CNN1D(input_dim=ch, kernel_size=ts, output_dim=2, lr=lr),
         'Wavenet': lambda ch, ts, lr: Wavenet(input_dim=ch, output_dim=2, kernel_size=ts, lr=lr),
-        'LSTM': lambda ch, ts, lr: LSTM(input_dim=ch, output_dim=2, lr=lr)
+        'LSTM': lambda ch, ts, lr: LSTM(input_dim=ch, output_dim=2, lr=lr),
+        'Wavenet2': lambda ch, ts, lr: Wavenet2(input_dim=ch, output_dim=2, kernel_size=ts, lr=lr),
     }
 
     # Default parameters
@@ -402,7 +404,7 @@ def setup_and_train_models(
             plt.xlabel("Epoch")
             plt.ylabel("Loss")
             plt.title("Training Loss vs Epoch")
-            plt.savefig(os.path.join(model_folder, 'training_loss.png'))
+            plt.savefig(os.path.join(model_folder, f'training_loss.png'))
             plt.close()
 
             # Plot validation accuracy
@@ -611,8 +613,10 @@ def analyze_seizure_propagation(
             'performance': performance,
             'probabilities': probabilities,
             'smoothed_probabilities': prob_smoothed,
-            'sorted_indices': sorted_indices,
+            'sorted_indices': sorted_indices[::-1],
             'channel_names': channel_names,
+            'true_seizure_channels': map_channels_to_numbers(sorted_indices, channel_names, seizure_channels),
+            'true_onset_channels': map_channels_to_numbers(sorted_indices, channel_names, seizure_onset_channels),
             'parameters': params,
             'sampling_rate': fs,
             'save_folder': save_folder
@@ -628,6 +632,16 @@ def analyze_seizure_propagation(
     except Exception as e:
         print(f"Error in analysis: {str(e)}")
         raise
+
+
+# def setup_and_train_contact_recognition(
+#         data_folder: str,
+#         model_folder: str,
+#         model_names: list = None,
+#         train: bool = False,
+#         marking_file: str = 'data/Seizure_Onset_Type_ML_USC.xlsx',
+#         params: dict = None
+# ):
 
 
 def save_results(results: dict, save_folder: str, model_name: str = None) -> str:

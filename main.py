@@ -1,16 +1,7 @@
 import pickle
 import os
-import numpy as np
-import torch
-import matplotlib.pyplot as plt
 
-from utils import split_data
-from plotFun import plot_time_limited_heatmap, plot_eeg_style
 from steps import init_examination, preprocessing, setup_and_train_models, analyze_seizure_propagation
-from datasetConstruct import (combine_loaders,
-                              load_seizure_across_patients, create_dataset,
-                              EDFData, load_single_seizure)
-from models import train_using_optimizer, evaluate_model, output_to_probability
 
 DATA_FOLDER = "data"
 RESULT_FOLDER = "result"

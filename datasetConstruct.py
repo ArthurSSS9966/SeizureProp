@@ -6,8 +6,8 @@ from datetime import datetime, timedelta
 import mne
 from torch.utils.data import Dataset
 import torch
-from utils import process_edf_channels_and_create_new_gridmap, find_seizure_annotations
-from utils import split_data
+from utils import (process_edf_channels_and_create_new_gridmap, find_seizure_annotations, split_data,
+                   find_seizure_related_channels, map_seizure_channels)
 from torch.utils.data import DataLoader, ConcatDataset
 from sklearn.model_selection import StratifiedShuffleSplit
 
@@ -214,41 +214,95 @@ class CustomDataset(Dataset):
 
 def load_seizure(path):
     """
-    Load the seizure data from the specified path and seizure number.
+    Load the seizure data from the specified path and handle both marked and unmarked channels.
 
     :param path: Path to the seizure data
-    :param seizure_number: Seizure number to load
-    :return: Tuple of (raw, gridmap)
+    :return: Combined seizure data
     """
 
-    seizure_data_combined = EDFData(None, None, None)
+    def load_seizure_data(seizure_no, patient_no, gridmap,
+                          marking_file='data/Seizure_Onset_Type_ML_USC.xlsx'):
+        """Load seizure data and channel information"""
+        try:
+            # Load seizure marking data
+            seizure_marking = pd.read_excel(marking_file)
 
-    # Find all seizure data that ends with CLEANED.pkl and does not have STIM in the name
-    cleaned_files = [f for f in os.listdir(path) if f.endswith("CLEANED.pkl") and "STIM" not in f]
+            # Find seizure-related channels
+            seizure_channels, _ = find_seizure_related_channels(
+                seizure_marking, seizure_no, patient_no
+            )
+            seizure_channels = map_seizure_channels(seizure_channels, gridmap, mode='name_to_num')
+            return seizure_channels
+        except:
+            return None
+
+    seizure_data_combined = EDFData(None, None, None)
+    raw_data_list = []  # Store all raw data for later processing
+
+    # First pass: collect raw data
+    cleaned_files = [f for f in os.listdir(path) if f.endswith("CLEANED.pkl") and ("STIM" not in f)]
 
     for cleaned_file in cleaned_files:
-        # Load the raw EEG data
         raw = pickle.load(open(os.path.join(path, cleaned_file), "rb"))
+        seizure_No = int(raw.seizureNumber.split("SZ")[-1]) if raw.seizureNumber.split("SZ")[-1].isdigit() else 1
+        seizure_channels = load_seizure_data(seizure_No, raw.patNo, raw.gridmap)
 
+        # If no channels are marked, use all available channels
+        if seizure_channels is None or len(seizure_channels) == 0:
+            print(f"Warning: No marked channels for seizure {seizure_No} of patient {raw.patNo}. Using all channels.")
+            seizure_channels = list(range(raw.ictal.shape[1]))  # Use all available channels
+
+        raw_data_list.append((raw, seizure_channels))
+
+    # Process each seizure
+    for i, (raw, seizure_channels) in enumerate(raw_data_list):
+        # Keep only the relevant channels for marked seizures
+        if seizure_channels is not None:
+            raw.ictal = raw.ictal[:, seizure_channels]
+
+        # Split the data into segments
         raw.interictal = split_data(raw.interictal, raw.samplingRate)
         raw.ictal = split_data(raw.ictal, raw.samplingRate)
         raw.postictal = split_data(raw.postictal, raw.samplingRate)
         raw.preictal2 = split_data(raw.preictal2, raw.samplingRate)
         raw.postictal2 = split_data(raw.postictal2, raw.samplingRate)
 
+        # Initialize combined data with the first seizure
         if seizure_data_combined.patNo is None:
             seizure_data_combined = raw
             seizure_data_combined.interictal = np.concatenate((seizure_data_combined.interictal,
                                                                raw.preictal2), axis=0)
             seizure_data_combined.postictal = np.concatenate((seizure_data_combined.postictal,
-                                                                raw.postictal2), axis=0)
+                                                              raw.postictal2), axis=0)
         else:
+            # Check if dimensions match
+            if raw.ictal.shape[2] != seizure_data_combined.ictal.shape[2]:
+                print(f"Warning: Channel mismatch in seizure {raw.seizureNumber}. Adjusting dimensions...")
+                # Pad with zeros if necessary
+                max_channels = max(raw.ictal.shape[2], seizure_data_combined.ictal.shape[2])
+
+                # Pad current seizure if needed
+                if raw.ictal.shape[2] < max_channels:
+                    padding = np.zeros((raw.ictal.shape[0], raw.ictal.shape[1],
+                                        max_channels - raw.ictal.shape[2]))
+                    raw.ictal = np.concatenate((raw.ictal, padding), axis=2)
+
+                # Pad combined data if needed
+                if seizure_data_combined.ictal.shape[2] < max_channels:
+                    padding = np.zeros((seizure_data_combined.ictal.shape[0],
+                                        seizure_data_combined.ictal.shape[1],
+                                        max_channels - seizure_data_combined.ictal.shape[2]))
+                    seizure_data_combined.ictal = np.concatenate((seizure_data_combined.ictal,
+                                                                  padding), axis=2)
+
+            # Combine the data
             seizure_data_combined.ictal = np.vstack((seizure_data_combined.ictal, raw.ictal))
-            seizure_data_combined.interictal = np.vstack((seizure_data_combined.interictal, raw.interictal, raw.preictal2))
-            seizure_data_combined.postictal = np.vstack((seizure_data_combined.postictal, raw.postictal, raw.postictal2))
+            seizure_data_combined.interictal = np.vstack((seizure_data_combined.interictal,
+                                                          raw.interictal, raw.preictal2))
+            seizure_data_combined.postictal = np.vstack((seizure_data_combined.postictal,
+                                                         raw.postictal, raw.postictal2))
 
-        seizure_data_combined.seizureNumber = 'All'
-
+    seizure_data_combined.seizureNumber = 'All'
     return seizure_data_combined
 
 def load_seizure_across_patients(data_folder):
@@ -285,8 +339,20 @@ def load_single_seizure(path, seizure_number):
     return raw
 
 
-def create_dataset(seizure, train_percentage=0.8, batch_size=512):
+def create_dataset(seizure, train_percentage=0.8, batch_size=512, min_activity_threshold=1e-6):
+    """
+    Create training and validation datasets, handling zero-padded channels after flattening.
 
+    Args:
+        seizure: Seizure data object containing ictal, interictal, and postictal data
+        train_percentage: Percentage of data to use for training
+        batch_size: Size of batches for training
+        min_activity_threshold: Minimum activity threshold to consider a sample non-empty
+
+    Returns:
+        train_loader: DataLoader for training data
+        val_loader: DataLoader for validation data
+    """
     seizure_data = seizure.ictal
     nonseizure_data = seizure.interictal
     nonseizure_data_postictal = seizure.postictal
@@ -294,53 +360,72 @@ def create_dataset(seizure, train_percentage=0.8, batch_size=512):
     # Combine the nonseizure and postictal data
     nonseizure_data = np.concatenate((nonseizure_data, nonseizure_data_postictal), axis=0)
 
-    # Flatten the train dataset from [Sample, Time, Channel] to [Sample * Channel, Time, 1]
-    seizure_data = seizure_data.reshape(-1, seizure_data.shape[1], 1)
-    nonseizure_data = nonseizure_data.reshape(-1, seizure_data.shape[1], 1)
+    # Transpose to get the correct shape for the model
+    seizure_data_flat = seizure_data.transpose(0, 2, 1)
+    nonseizure_data_flat = nonseizure_data.transpose(0, 2, 1)
+
+    # Flatten the dataset from [Sample, Time, Channel] to [Sample * Channel, Time, 1]
+    seizure_data_flat = np.concatenate([seizure_data_flat[:, i, :] for i in range(seizure_data_flat.shape[1])], axis=0)
+    nonseizure_data_flat = np.concatenate([nonseizure_data_flat[:, i, :] for i in range(nonseizure_data_flat.shape[1])], axis=0)
+
+    # Remove flattened samples that are all zeros (from padding)
+    sample_activity = np.sum(np.abs(seizure_data_flat), axis=1)  # Sum across time dimension only
+    active_samples = sample_activity.squeeze() > min_activity_threshold
+
+    if np.sum(active_samples) == 0:
+        print("Warning: No active samples found in seizure data. Check your data or threshold.")
+    else:
+        n_removed = len(active_samples) - np.sum(active_samples)
+        print(f"Removed {n_removed} zero-padded samples out of {len(active_samples)} total samples")
+        seizure_data_flat = seizure_data_flat[active_samples]
 
     # Create the labels
-    seizure_labels = np.ones(len(seizure_data))
-    nonseizure_labels = np.zeros(len(nonseizure_data))
+    seizure_labels = np.ones(len(seizure_data_flat))
+    nonseizure_labels = np.zeros(len(nonseizure_data_flat))
 
-    seizure_data = seizure_data.transpose(0, 2, 1)
-    nonseizure_data = nonseizure_data.transpose(0, 2, 1)
-
-    # Combine the dataset and labels, then shuffle them and create training and validation sets
-    data = np.concatenate((seizure_data, nonseizure_data), axis=0)
+    # Combine the dataset and labels
+    data = np.concatenate((seizure_data_flat, nonseizure_data_flat), axis=0)
+    data = np.expand_dims(data, axis=2)  # Add channel dimension
+    data = np.transpose(data, (0, 2, 1))  # Transpose to [Sample, Channel, Time]
     labels = np.concatenate((seizure_labels, nonseizure_labels), axis=0)
 
     # Shuffle the data
     shuffled_indices = np.random.permutation(len(data))
     data = data[shuffled_indices]
-
     labels = labels[shuffled_indices]
 
-    # Create a subset of the data for balanced dataset
+    # Create a balanced dataset
     seizure_indices = np.where(labels == 1)[0]
     nonseizure_indices = np.where(labels == 0)[0]
 
     n_samples = min(len(seizure_indices), len(nonseizure_indices))
+    if n_samples == 0:
+        raise ValueError("No valid samples found after filtering. Check your data and threshold.")
+
+    print(f"Using {n_samples} samples from each class for balanced dataset")
+
     seizure_indices = np.random.choice(seizure_indices, n_samples, replace=False)
     nonseizure_indices = np.random.choice(nonseizure_indices, n_samples, replace=False)
 
     data = np.concatenate((data[seizure_indices], data[nonseizure_indices]), axis=0)
     labels = np.concatenate((labels[seizure_indices], labels[nonseizure_indices]), axis=0)
-    # Use stratified sampling to create the training and validation sets
 
+    # Use stratified sampling for train/val split
     sss = StratifiedShuffleSplit(n_splits=1, test_size=1 - train_percentage, random_state=0)
     for train_index, val_index in sss.split(data, labels):
         train_data, val_data = data[train_index], data[val_index]
         train_labels, val_labels = labels[train_index], labels[val_index]
 
-    # Load the dataset
+    # Create the data loaders
     train_dataset = CustomDataset(train_data, train_labels)
     val_dataset = CustomDataset(val_data, val_labels)
 
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=True)
 
-    return train_loader, val_loader
+    print(f"Final dataset shapes - Training: {train_data.shape}, Validation: {val_data.shape}")
 
+    return train_loader, val_loader
 
 def combine_loaders(loader_list, batch_size=512):
     # Extract datasets from DataLoaders

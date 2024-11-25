@@ -217,6 +217,87 @@ class Wavenet(nn.Module):
         output = self(x)
         return output
 
+
+class Wavenet2(nn.Module):
+    def __init__(self, input_dim, output_dim, lr=0.001, hidden_dim=128, weight_decay=1e-5,
+                 dropout=0.2, kernel_size=32, dilation=1):
+        super(Wavenet2, self).__init__()
+
+        self.padding1 = (kernel_size - 1) * dilation
+        self.padding2 = (kernel_size // 2 - 1) * dilation
+        self.padding3 = (kernel_size // 4 - 1) * dilation
+
+        # Convolutional layers
+        self.conv1 = nn.Conv1d(input_dim, hidden_dim, kernel_size=kernel_size, padding=0, dilation=dilation).to(
+            'cuda:0')
+        self.maxpool1 = nn.MaxPool1d(2).to('cuda:0')
+        self.dropout1 = nn.Dropout(dropout).to('cuda:0')
+
+        self.conv2 = nn.Conv1d(hidden_dim, hidden_dim // 2, kernel_size=kernel_size // 2, padding=0,
+                               dilation=dilation).to('cuda:0')
+        self.maxpool2 = nn.MaxPool1d(2).to('cuda:0')
+        self.dropout2 = nn.Dropout(dropout).to('cuda:0')
+
+        self.conv3 = nn.Conv1d(hidden_dim // 2, hidden_dim // 4, kernel_size=kernel_size // 4, padding=0,
+                               dilation=dilation).to('cuda:0')
+        self.maxpool3 = nn.MaxPool1d(2).to('cuda:0')
+        self.dropout3 = nn.Dropout(dropout).to('cuda:0')
+
+        # Global average pooling
+        self.global_pool = nn.AdaptiveAvgPool1d(1).to('cuda:0')
+
+        # FC layers with fixed size due to global pooling
+        self.fc1 = nn.Linear(hidden_dim // 4, hidden_dim // 8).to('cuda:0')
+        self.dropout4 = nn.Dropout(dropout).to('cuda:0')
+        self.fc2 = nn.Linear(hidden_dim // 8, output_dim).to('cuda:0')
+
+        self.optimizer = optim.Adam(self.parameters(), lr=lr, weight_decay=weight_decay)
+        self.criteria = nn.CrossEntropyLoss()
+
+    def forward(self, x):
+        x = x.to('cuda:0')
+
+        # Convolutional layers
+        x = F.pad(x, (self.padding1, 0))
+        x = F.relu(self.conv1(x))
+        x = self.maxpool1(x)
+        x = self.dropout1(x)
+
+        x = F.pad(x, (self.padding2, 0))
+        x = F.relu(self.conv2(x))
+        x = self.maxpool2(x)
+        x = self.dropout2(x)
+
+        x = F.pad(x, (self.padding3, 0))
+        x = F.relu(self.conv3(x))
+        x = self.maxpool3(x)
+        x = self.dropout3(x)
+
+        # Global average pooling
+        x = self.global_pool(x)
+        x = x.squeeze(-1)
+
+        # FC layers
+        x = F.relu(self.fc1(x))
+        x = self.dropout4(x)
+        x = F.softmax(self.fc2(x), dim=1)
+
+        return x
+
+    def random_init(self):
+        for name, param in self.named_parameters():
+            if 'weight' in name:
+                nn.init.uniform_(param.data, -0.1, 0.1)
+            elif 'bias' in name:
+                nn.init.zeros_(param.data)
+
+    def predict(self, x):
+        self.eval()
+        x = x.to('cuda:0')
+        output = self(x)
+        return output
+
+
 class EarlyStopping:
     """Early stopping handler"""
 
