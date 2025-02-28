@@ -2,9 +2,11 @@ import os
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy.signal import welch, decimate
-from sklearn.preprocessing import RobustScaler
+from sklearn.preprocessing import RobustScaler, StandardScaler
+from scipy import signal
+from scipy.fftpack import fft
 from statsmodels.tsa.ar_model import AutoReg
-from meegkit import dss
+# from meegkit import dss
 from tqdm import tqdm
 import pickle
 from typing import Tuple, Optional, List, Dict
@@ -20,7 +22,8 @@ from plotFun import plot_time_limited_heatmap, plot_eeg_style
 from datasetConstruct import (combine_loaders,
                               load_seizure_across_patients, create_dataset,
                               EDFData, load_single_seizure)
-from models import train_using_optimizer, evaluate_model, output_to_probability, Wavenet, CNN1D, LSTM, Wavenet2
+from models import (train_using_optimizer, evaluate_model, output_to_probability, Wavenet, CNN1D,
+                    LSTM, S4Model, WaveResNet)
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -144,6 +147,17 @@ class SignalProcessor:
     """Class for signal processing operations."""
 
     @staticmethod
+    def bipolar_reference(data: np.ndarray, gridmap: Dict) -> np.ndarray:
+        """Apply bipolar referencing to data."""
+        bipolar_data = np.zeros(data.shape)
+        for i, e in enumerate(gridmap['Channel']):
+            start, end = map(int, e.split(':'))
+            for j in range(start, end):
+                bipolar_data[:, j] = data[:, j] - data[:, j + 1]
+            bipolar_data[:, end] = data[:, end]
+        return bipolar_data
+
+    @staticmethod
     def normalize_signal(signal: np.ndarray, reference: np.ndarray) -> np.ndarray:
         """Normalize signal using RobustScaler."""
         normalized = np.zeros_like(signal)
@@ -185,8 +199,8 @@ class SignalProcessor:
         for e in tqdm(gridmap['Channel'], desc="Removing line noise"):
             start, end = map(int, e.split(':'))
             section = cleaned_data[:, start:end + 1]
-            for f0 in line_freqs:
-                section, _ = dss.dss_line_iter(section, f0, fs)
+            # for f0 in line_freqs:
+            #     section, _ = dss.dss_line_iter(section, f0, fs)
             cleaned_data[:, start:end + 1] = section
         return cleaned_data
 
@@ -208,6 +222,12 @@ def preprocessing(dataset, data_folder: str):
         # Scale data
         for key in data_dict:
             data_dict[key] = data_dict[key] * 1e6
+
+        # Apply bipolar referencing
+        for key in data_dict:
+            data_dict[key] = processor.bipolar_reference(
+                data_dict[key], dataset.gridmap
+            )
 
         # Remove line noise
         for key in data_dict:
@@ -260,11 +280,395 @@ def preprocessing(dataset, data_folder: str):
         raise
 
 
+class EEGTimeSeriesFeatureExtractor:
+    """
+    Extracts time-series features from EEG signals by calculating features
+    in sliding windows across the signal.
+
+    Features include:
+    - Half-wave features
+    - Line length
+    - Signal area (energy)
+    - Frequency band powers (delta, theta, alpha, beta, gamma)
+    """
+
+    def __init__(self, sampling_rate=256, window_duration=0.05, window_step=0.025):
+        """
+        Initialize the feature extractor with moving window parameters.
+
+        Args:
+            sampling_rate: Number of samples per second in the EEG data
+            window_duration: Duration of sliding window in seconds (default: 50ms)
+            window_step: Step size for window sliding in seconds (default: 25ms)
+        """
+        self.sampling_rate = sampling_rate
+
+        # Calculate window sizes in samples
+        self.window_samples = int(window_duration * sampling_rate)
+        self.step_samples = int(window_step * sampling_rate)
+
+        # Define frequency bands (Hz)
+        self.freq_bands = {
+            'beta': (13, 30),
+            'gamma': (30, 100),
+            'high_gamma': (100, 200),
+        }
+
+    def extract_half_wave_features(self, signal_window):
+        """
+        Extract features based on half-wave analysis.
+
+        Args:
+            signal_window: 1D array of signal values
+
+        Returns:
+            Dictionary of half-wave features
+        """
+        # Apply bandpass filter (1-30Hz is typical for seizure detection)
+        sos = signal.butter(4, [1, 30], 'bandpass', fs=self.sampling_rate, output='sos')
+        filtered_signal = signal.sosfilt(sos, signal_window)
+
+        # Find zero crossings
+        zero_crossings = np.where(np.diff(np.signbit(filtered_signal)))[0]
+
+        # If no zero crossings found, return zeros
+        if len(zero_crossings) <= 1:
+            return {
+                'hw_count': 0,
+                'hw_mean_amp': 0,
+                'hw_max_amp': 0,
+                'hw_mean_duration': 0
+            }
+
+        # Compute half-wave amplitudes and durations
+        half_wave_amps = []
+        half_wave_durations = []
+
+        for i in range(len(zero_crossings) - 1):
+            start_idx = zero_crossings[i]
+            end_idx = zero_crossings[i + 1]
+
+            # Calculate half-wave duration in samples
+            duration = end_idx - start_idx
+            half_wave_durations.append(duration)
+
+            # Get max amplitude in this half-wave
+            segment = filtered_signal[start_idx:end_idx]
+            if len(segment) > 0:
+                half_wave_amps.append(np.max(np.abs(segment)))
+
+        # Return features
+        return {
+            'hw_count': len(half_wave_amps),
+            'hw_mean_amp': np.mean(half_wave_amps) if half_wave_amps else 0,
+            'hw_max_amp': np.max(half_wave_amps) if half_wave_amps else 0,
+            'hw_mean_duration': np.mean(half_wave_durations) / self.sampling_rate if half_wave_durations else 0
+        }
+
+    def extract_line_length(self, signal_window):
+        """
+        Compute line length feature.
+
+        Args:
+            signal_window: 1D array of signal values
+
+        Returns:
+            Line length value
+        """
+        return np.sum(np.abs(np.diff(signal_window)))
+
+    def extract_area(self, signal_window):
+        """
+        Compute area under the curve (signal energy).
+
+        Args:
+            signal_window: 1D array of signal values
+
+        Returns:
+            Area value
+        """
+        return np.sum(np.abs(signal_window))
+
+    def extract_frequency_bands(self, signal_window):
+        """
+        Extract power in standard frequency bands using FFT.
+
+        Args:
+            signal_window: 1D array of signal values
+
+        Returns:
+            Dictionary of band powers
+        """
+        # Apply Hamming window to reduce spectral leakage
+        windowed_signal = signal_window * np.hamming(len(signal_window))
+
+        # Compute FFT
+        fft_vals = fft(windowed_signal)
+        fft_abs = np.abs(fft_vals[:len(signal_window) // 2])
+
+        # Normalize by window length
+        fft_abs = fft_abs / len(signal_window)
+
+        # Calculate frequency bins
+        freq_bins = np.fft.fftfreq(len(signal_window), 1 / self.sampling_rate)[:len(signal_window) // 2]
+
+        # Calculate band powers
+        band_powers = {}
+        for band_name, (low_freq, high_freq) in self.freq_bands.items():
+            band_mask = (freq_bins >= low_freq) & (freq_bins <= high_freq)
+            band_power = np.sum(fft_abs[band_mask] ** 2)
+            band_powers[f'power_{band_name}'] = band_power
+
+        # Calculate relative band powers
+        total_power = sum(band_powers.values())
+        if total_power > 0:
+            for band_name in self.freq_bands.keys():
+                band_powers[f'rel_power_{band_name}'] = band_powers[f'power_{band_name}'] / total_power
+        else:
+            for band_name in self.freq_bands.keys():
+                band_powers[f'rel_power_{band_name}'] = 0
+
+        return band_powers
+
+    def extract_statistical_features(self, signal_window):
+        """
+        Extract basic statistical features from the signal.
+
+        Args:
+            signal_window: 1D array of signal values
+
+        Returns:
+            Dictionary of statistical features
+        """
+        return {
+            'mean': np.mean(signal_window),
+            'std': np.std(signal_window),
+            'kurtosis': self._kurtosis(signal_window),
+            'skewness': self._skewness(signal_window),
+            'max': np.max(signal_window),
+            'min': np.min(signal_window),
+            'peak_to_peak': np.max(signal_window) - np.min(signal_window),
+            'energy': np.sum(signal_window ** 2),
+            'rms': np.sqrt(np.mean(signal_window ** 2))
+        }
+
+    def _kurtosis(self, x):
+        """Compute kurtosis of a signal"""
+        n = len(x)
+        if n < 4:
+            return 0
+        mean = np.mean(x)
+        std = np.std(x, ddof=1)
+        if std == 0:
+            return 0
+        m4 = np.sum((x - mean) ** 4) / n
+        return m4 / (std ** 4) - 3  # -3 to make normal distribution have kurtosis=0
+
+    def _skewness(self, x):
+        """Compute skewness of a signal"""
+        n = len(x)
+        if n < 3:
+            return 0
+        mean = np.mean(x)
+        std = np.std(x, ddof=1)
+        if std == 0:
+            return 0
+        m3 = np.sum((x - mean) ** 3) / n
+        return m3 / (std ** 3)
+
+    def extract_hjorth_parameters(self, signal_window):
+        """
+        Extract Hjorth parameters (activity, mobility, complexity).
+
+        Args:
+            signal_window: 1D array of signal values
+
+        Returns:
+            Dictionary of Hjorth parameters
+        """
+        # Calculate first and second derivatives
+        diff1 = np.diff(signal_window)
+        diff2 = np.diff(diff1)
+
+        # Pad the derivatives to match original length
+        diff1 = np.append(diff1, diff1[-1])
+        diff2 = np.append(diff2, [diff2[-1], diff2[-1]])
+
+        # Calculate variance of signal and derivatives
+        var0 = np.var(signal_window)
+        var1 = np.var(diff1)
+        var2 = np.var(diff2)
+
+        # Calculate Hjorth parameters
+        activity = var0
+        mobility = np.sqrt(var1 / var0) if var0 > 0 else 0
+        complexity = np.sqrt(var2 / var1) / mobility if mobility > 0 and var1 > 0 else 0
+
+        return {
+            'hjorth_activity': activity,
+            'hjorth_mobility': mobility,
+            'hjorth_complexity': complexity
+        }
+
+    def extract_features_from_window(self, signal_window):
+        """
+        Extract all features from a single window of EEG data.
+
+        Args:
+            signal_window: 1D array of signal values
+
+        Returns:
+            Dictionary of all features
+        """
+        features = {}
+
+        # Extract half-wave features
+        features.update(self.extract_half_wave_features(signal_window))
+
+        # Add line length feature
+        features['line_length'] = self.extract_line_length(signal_window)
+
+        # Add area feature
+        features['area'] = self.extract_area(signal_window)
+
+        # Add frequency band powers
+        features.update(self.extract_frequency_bands(signal_window))
+
+        return features
+
+    def extract_time_series_features(self, signal_segment):
+        """
+        Extract time-series features from a 1-second segment using a moving window approach.
+        Each window produces a feature vector, maintaining the time-series nature of the data.
+
+        Args:
+            signal_segment: 1D array of signal values (1-second segment)
+
+        Returns:
+            2D array of features with shape (n_windows, n_features)
+            List of feature names
+        """
+        # Check if segment is long enough for sliding window
+        if len(signal_segment) < self.window_samples:
+            raise ValueError(
+                f"Signal segment length ({len(signal_segment)}) is shorter than window size ({self.window_samples})")
+
+        # Initialize list to store features from each window
+        window_features_list = []
+        window_times = []
+
+        # Slide window through the segment
+        for start_idx in range(0, len(signal_segment) - self.window_samples + 1, self.step_samples):
+            end_idx = start_idx + self.window_samples
+            window_time = start_idx / self.sampling_rate  # Time in seconds from start of segment
+
+            # Extract window
+            window = signal_segment[start_idx:end_idx]
+
+            # Extract features from this window
+            window_features = self.extract_features_from_window(window)
+
+            # Add to list
+            window_features_list.append(window_features)
+            window_times.append(window_time)
+
+        # Get feature names from the first window (if available)
+        feature_names = list(window_features_list[0].keys()) if window_features_list else []
+
+        # Convert list of dictionaries to 2D array
+        # Each row is a window, each column is a feature
+        feature_array = np.zeros((len(window_features_list), len(feature_names)))
+
+        for i, features in enumerate(window_features_list):
+            for j, feature_name in enumerate(feature_names):
+                feature_array[i, j] = features[feature_name]
+
+        return feature_array, feature_names, window_times
+
+
+def extract_sEEG_features(seizure_object, sampling_rate=128, window_duration=0.05, window_step=0.025):
+    """
+    Extract features from seizure object and store them back in the same object.
+
+    Args:
+        seizure_object: Object containing ictal, postictal, and interictal data
+                        Each field should be a 3D array with shape [segments, time, channels]
+        sampling_rate: Sampling rate of the EEG data
+        window_duration: Duration of sliding window in seconds (default: 50ms)
+        window_step: Step size for window sliding in seconds (default: 25ms)
+
+    Returns:
+        The same seizure object with added transformed data fields
+    """
+    # Initialize feature extractor
+    feature_extractor = EEGTimeSeriesFeatureExtractor(
+        sampling_rate=sampling_rate,
+        window_duration=window_duration,
+        window_step=window_step
+    )
+
+    # Process different seizure states
+    states = ['ictal', 'postictal', 'interictal']
+
+    # Store feature names
+    seizure_object.feature_names = None
+
+    for state in states:
+        # Get original data
+        original_data = getattr(seizure_object, state)
+        n_segments, segment_length, n_channels = original_data.shape
+
+        print(f"Processing {n_segments} {state} segments × {n_channels} channels")
+
+        # Store for transformed data
+        # We'll create a 4D array: [segments, channels, windows, features]
+        # First, we need to know the number of windows and features
+
+        # Check the shape of feature array for one segment
+        segment = original_data[0, :, 0]  # First segment, first channel
+        feature_array, feature_names, _ = feature_extractor.extract_time_series_features(segment)
+
+        if seizure_object.feature_names is None:
+            seizure_object.feature_names = feature_names
+
+        n_windows, n_features = feature_array.shape
+
+        # Initialize the transformed data array
+        transformed_data = np.zeros((n_segments, n_channels, n_windows, n_features))
+        window_times_data = np.zeros((n_segments, n_channels, n_windows))
+
+        # Process all segments and channels
+        for segment_idx in range(n_segments):
+            for channel_idx in range(n_channels):
+                # Extract segment
+                segment = original_data[segment_idx, :, channel_idx]
+
+                # Extract features
+                feature_array, _, window_times = feature_extractor.extract_time_series_features(segment)
+
+                # Store in the transformed data array
+                transformed_data[segment_idx, channel_idx] = feature_array
+                window_times_data[segment_idx, channel_idx] = window_times
+
+        # Store transformed data in the object
+        setattr(seizure_object, f"{state}_transformed", transformed_data)
+        setattr(seizure_object, f"{state}_window_times", window_times_data)
+
+    # Save seizure object
+    save_path = f"data/P{seizure_object.patNo}/seizure_combined.pkl"
+    with open(save_path, 'wb') as f:
+        pickle.dump(seizure_object, f)
+
+    return seizure_object
+
+
 def setup_and_train_models(
         data_folder: str,
         model_folder: str,
         model_names: list = None,
         train: bool = False,
+        input_type='raw',
+        data_aug = False,
         params: dict = None
 ):
     """
@@ -286,7 +690,8 @@ def setup_and_train_models(
         'CNN1D': lambda ch, ts, lr: CNN1D(input_dim=ch, kernel_size=ts, output_dim=2, lr=lr),
         'Wavenet': lambda ch, ts, lr: Wavenet(input_dim=ch, output_dim=2, kernel_size=ts, lr=lr),
         'LSTM': lambda ch, ts, lr: LSTM(input_dim=ch, output_dim=2, lr=lr),
-        'Wavenet2': lambda ch, ts, lr: Wavenet2(input_dim=ch, output_dim=2, kernel_size=ts, lr=lr),
+        'S4': lambda ch, ts, lr: S4Model(d_input=ch, d_output=2, lr=lr),
+        'ResNet': lambda ch, ts, lr: WaveResNet(in_channels=ch, n_classes=2, lr=lr, kernel_size=ts)
     }
 
     # Default parameters
@@ -318,10 +723,10 @@ def setup_and_train_models(
     # Create model folder if it doesn't exist
     os.makedirs(model_folder, exist_ok=True)
 
-    def prepare_data(data_folder: str, batch_size: int):
+    def prepare_data(data_folder: str, batch_size: int, data_aug=data_aug, input_type=input_type):
         """Prepare datasets and dataloaders"""
         seizure_across_patients = load_seizure_across_patients(data_folder)
-        ml_datasets = [create_dataset(seizure, batch_size=batch_size)
+        ml_datasets = [create_dataset(seizure, batch_size=batch_size, input_type=input_type)
                        for seizure in seizure_across_patients]
         train_loader, val_loader = combine_loaders(ml_datasets, batch_size=batch_size)
         channels, time_steps = train_loader.dataset[0][0].shape
@@ -404,7 +809,7 @@ def setup_and_train_models(
             plt.xlabel("Epoch")
             plt.ylabel("Loss")
             plt.title("Training Loss vs Epoch")
-            plt.savefig(os.path.join(model_folder, f'training_loss.png'))
+            plt.savefig(os.path.join(model_folder, f'{name}training_loss.png'))
             plt.close()
 
             # Plot validation accuracy
@@ -416,7 +821,7 @@ def setup_and_train_models(
             plt.xlabel("Epoch")
             plt.ylabel("Accuracy")
             plt.title("Validation Accuracy vs Epoch")
-            plt.savefig(os.path.join(model_folder, 'validation_accuracy.png'))
+            plt.savefig(os.path.join(model_folder, f'{name}validation_accuracy.png'))
             plt.close()
 
         return results, models
@@ -632,16 +1037,6 @@ def analyze_seizure_propagation(
     except Exception as e:
         print(f"Error in analysis: {str(e)}")
         raise
-
-
-# def setup_and_train_contact_recognition(
-#         data_folder: str,
-#         model_folder: str,
-#         model_names: list = None,
-#         train: bool = False,
-#         marking_file: str = 'data/Seizure_Onset_Type_ML_USC.xlsx',
-#         params: dict = None
-# ):
 
 
 def save_results(results: dict, save_folder: str, model_name: str = None) -> str:

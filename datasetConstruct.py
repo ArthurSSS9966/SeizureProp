@@ -310,11 +310,16 @@ def load_seizure_across_patients(data_folder):
     seizure_data_combined = []
 
     for folder in os.listdir(data_folder):
-        # if not a folder
-        if not os.path.isdir(os.path.join(data_folder, folder)):
+        # if not a folder or the folder does not start with P, skip
+        if not os.path.isdir(os.path.join(data_folder, folder)) or not folder.startswith("P"):
             continue
-        seizure_single = load_seizure(os.path.join(data_folder, folder))
-        seizure_data_combined.append(seizure_single)
+        # if there is a file called seizure_combined
+        if os.path.exists(os.path.join(data_folder, folder, "seizure_combined.pkl")):
+            seizure_single = pickle.load(open(os.path.join(data_folder, folder, "seizure_combined.pkl"), "rb"))
+            seizure_data_combined.append(seizure_single)
+        else:
+            seizure_single = load_seizure(os.path.join(data_folder, folder))
+            seizure_data_combined.append(seizure_single)
 
     return seizure_data_combined
 
@@ -339,55 +344,263 @@ def load_single_seizure(path, seizure_number):
     return raw
 
 
-def create_dataset(seizure, train_percentage=0.8, batch_size=512, min_activity_threshold=1e-6):
+def create_dataset(seizure, train_percentage=0.8, batch_size=512, min_activity_threshold=1e-6,
+                   input_type='raw', window_size=20, sliding_step=5):
     """
     Create training and validation datasets, handling zero-padded channels after flattening.
+    Supports raw data, transformed features, or a combined approach.
 
     Args:
         seizure: Seizure data object containing ictal, interictal, and postictal data
         train_percentage: Percentage of data to use for training
         batch_size: Size of batches for training
         min_activity_threshold: Minimum activity threshold to consider a sample non-empty
+        input_type: Type of input data to use ('raw', 'transformed', or 'combined')
+        window_size: Number of consecutive windows to include for transformed features
+        sliding_step: Step size for sliding window in transformed features
 
     Returns:
         train_loader: DataLoader for training data
         val_loader: DataLoader for validation data
     """
-    seizure_data = seizure.ictal
-    nonseizure_data = seizure.interictal
-    nonseizure_data_postictal = seizure.postictal
+    from torch.utils.data import DataLoader, Dataset
+    import numpy as np
+    from sklearn.model_selection import StratifiedShuffleSplit
 
-    # Combine the nonseizure and postictal data
-    nonseizure_data = np.concatenate((nonseizure_data, nonseizure_data_postictal), axis=0)
+    # Define custom dataset class if not already defined
+    class CustomDataset(Dataset):
+        def __init__(self, data, labels):
+            self.data = data
+            self.labels = labels
 
-    # Transpose to get the correct shape for the model
-    seizure_data_flat = seizure_data.transpose(0, 2, 1)
-    nonseizure_data_flat = nonseizure_data.transpose(0, 2, 1)
+        def __len__(self):
+            return len(self.data)
 
-    # Flatten the dataset from [Sample, Time, Channel] to [Sample * Channel, Time, 1]
-    seizure_data_flat = np.concatenate([seizure_data_flat[:, i, :] for i in range(seizure_data_flat.shape[1])], axis=0)
-    nonseizure_data_flat = np.concatenate([nonseizure_data_flat[:, i, :] for i in range(nonseizure_data_flat.shape[1])], axis=0)
+        def __getitem__(self, idx):
+            return self.data[idx], self.labels[idx]
 
-    # Remove flattened samples that are all zeros (from padding)
-    sample_activity = np.sum(np.abs(seizure_data_flat), axis=1)  # Sum across time dimension only
-    active_samples = sample_activity.squeeze() > min_activity_threshold
+    if input_type == 'raw':
+        # Original raw data approach
+        seizure_data = seizure.ictal
+        nonseizure_data = seizure.interictal
+        nonseizure_data_postictal = seizure.postictal
 
-    if np.sum(active_samples) == 0:
-        print("Warning: No active samples found in seizure data. Check your data or threshold.")
+        # Combine the nonseizure and postictal data
+        nonseizure_data = np.concatenate((nonseizure_data, nonseizure_data_postictal), axis=0)
+
+        # Transpose to get the correct shape for the model
+        seizure_data_flat = seizure_data.transpose(0, 2, 1)
+        nonseizure_data_flat = nonseizure_data.transpose(0, 2, 1)
+
+        # Flatten the dataset from [Sample, Channel, Time] to [Sample * Channel, Time, 1]
+        seizure_data_flat = np.concatenate([seizure_data_flat[:, i, :] for i in range(seizure_data_flat.shape[1])],
+                                           axis=0)
+        nonseizure_data_flat = np.concatenate(
+            [nonseizure_data_flat[:, i, :] for i in range(nonseizure_data_flat.shape[1])], axis=0)
+
+        # Remove flattened samples that are all zeros (from padding)
+        sample_activity = np.sum(np.abs(seizure_data_flat), axis=1)  # Sum across time dimension only
+        active_samples = sample_activity.squeeze() > min_activity_threshold
+
+        if np.sum(active_samples) == 0:
+            print("Warning: No active samples found in seizure data. Check your data or threshold.")
+        else:
+            n_removed = len(active_samples) - np.sum(active_samples)
+            print(f"Removed {n_removed} zero-padded samples out of {len(active_samples)} total samples")
+            seizure_data_flat = seizure_data_flat[active_samples]
+
+        # Create the labels
+        seizure_labels = np.ones(len(seizure_data_flat))
+        nonseizure_labels = np.zeros(len(nonseizure_data_flat))
+
+        # Combine the dataset and labels
+        data = np.concatenate((seizure_data_flat, nonseizure_data_flat), axis=0)
+        data = np.expand_dims(data, axis=2)  # Add channel dimension
+        data = np.transpose(data, (0, 2, 1))  # Transpose to [Sample, Channel, Time]
+        labels = np.concatenate((seizure_labels, nonseizure_labels), axis=0)
+
+    elif input_type == 'transformed':
+        # Process transformed data
+        # Check if the transformed data exists
+        if not hasattr(seizure, 'ictal_transformed') or not hasattr(seizure, 'interictal_transformed'):
+            raise ValueError("Transformed data not found. Run extract_features_store_in_object first.")
+
+        # Prepare transformed data for LSTM/CNN input
+        X_sequences = []
+        y_labels = []
+
+        # Process ictal data (seizure)
+        ictal_data = seizure.ictal_transformed
+        n_segments, n_channels, n_windows, n_features = ictal_data.shape
+
+        if n_windows < window_size:
+            print(f"Warning: ictal data has only {n_windows} windows, but window_size is {window_size}.")
+        else:
+            for segment_idx in range(n_segments):
+                for channel_idx in range(n_channels):
+                    # Get feature time series for this segment and channel
+                    feature_array = ictal_data[segment_idx, channel_idx]
+
+                    # Create sequences by sliding window
+                    for i in range(0, n_windows - window_size + 1, sliding_step):
+                        # Extract sequence
+                        sequence = feature_array[i:i + window_size]
+
+                        # Add to lists
+                        X_sequences.append(sequence)
+                        y_labels.append(1)  # Seizure label
+
+        # Process interictal data (non-seizure)
+        interictal_data = seizure.interictal_transformed
+        n_segments, n_channels, n_windows, n_features = interictal_data.shape
+
+        if n_windows < window_size:
+            print(f"Warning: interictal data has only {n_windows} windows, but window_size is {window_size}.")
+        else:
+            for segment_idx in range(n_segments):
+                for channel_idx in range(n_channels):
+                    # Get feature time series for this segment and channel
+                    feature_array = interictal_data[segment_idx, channel_idx]
+
+                    # Create sequences by sliding window
+                    for i in range(0, n_windows - window_size + 1, sliding_step):
+                        # Extract sequence
+                        sequence = feature_array[i:i + window_size]
+
+                        # Add to lists
+                        X_sequences.append(sequence)
+                        y_labels.append(0)  # Non-seizure label
+
+        # Process postictal data (also non-seizure but post-seizure)
+        postictal_data = seizure.postictal_transformed
+        n_segments, n_channels, n_windows, n_features = postictal_data.shape
+
+        if n_windows < window_size:
+            print(f"Warning: postictal data has only {n_windows} windows, but window_size is {window_size}.")
+        else:
+            for segment_idx in range(n_segments):
+                for channel_idx in range(n_channels):
+                    # Get feature time series for this segment and channel
+                    feature_array = postictal_data[segment_idx, channel_idx]
+
+                    # Create sequences by sliding window
+                    for i in range(0, n_windows - window_size + 1, sliding_step):
+                        # Extract sequence
+                        sequence = feature_array[i:i + window_size]
+
+                        # Add to lists
+                        X_sequences.append(sequence)
+                        y_labels.append(0)  # Non-seizure label (postictal)
+
+        # Convert to numpy arrays
+        data = np.array(X_sequences)
+        labels = np.array(y_labels)
+
+        # For compatibility with the model, ensure data is shaped as [Samples, Channels, Time]
+        # In this case, our "channels" dimension is the features dimension
+        # Reshape from [Samples, Window_size, Features] to [Samples, Features, Window_size]
+        data = np.transpose(data, (0, 2, 1))
+
+    elif input_type == 'combined':
+        # Combine raw data and transformed features
+        # First process raw data
+        seizure_data = seizure.ictal
+        nonseizure_data = np.concatenate((seizure.interictal, seizure.postictal), axis=0)
+
+        # Transpose raw data
+        seizure_data_raw = seizure_data.transpose(0, 2, 1)
+        nonseizure_data_raw = nonseizure_data.transpose(0, 2, 1)
+
+        # Flatten raw data
+        n_seizure_channels = seizure_data_raw.shape[1]
+        n_nonseizure_channels = nonseizure_data_raw.shape[1]
+
+        seizure_data_flat = np.concatenate([seizure_data_raw[:, i, :] for i in range(n_seizure_channels)], axis=0)
+        nonseizure_data_flat = np.concatenate([nonseizure_data_raw[:, i, :] for i in range(n_nonseizure_channels)],
+                                              axis=0)
+
+        # Remove inactive samples from raw data
+        sample_activity = np.sum(np.abs(seizure_data_flat), axis=1)
+        active_samples = sample_activity.squeeze() > min_activity_threshold
+
+        if np.sum(active_samples) == 0:
+            print("Warning: No active samples found in seizure data. Check your data or threshold.")
+        else:
+            n_removed = len(active_samples) - np.sum(active_samples)
+            print(f"Removed {n_removed} zero-padded samples out of {len(active_samples)} total samples")
+            seizure_data_flat = seizure_data_flat[active_samples]
+
+        # Now process transformed data
+        X_sequences = []
+        raw_segments = []
+        y_labels = []
+
+        # Process ictal data (seizure)
+        ictal_transformed = seizure.ictal_transformed
+        ictal_raw = seizure.ictal
+        n_segments, n_channels, n_windows, n_features = ictal_transformed.shape
+
+        for segment_idx in range(n_segments):
+            for channel_idx in range(n_channels):
+                # Get feature time series
+                feature_array = ictal_transformed[segment_idx, channel_idx]
+
+                # Get corresponding raw data
+                raw_data = ictal_raw[segment_idx, :, channel_idx]
+
+                # Skip if not enough windows
+                if n_windows < window_size:
+                    continue
+
+                # Create sequences
+                for i in range(0, n_windows - window_size + 1, sliding_step):
+                    sequence = feature_array[i:i + window_size]
+                    X_sequences.append(sequence)
+                    raw_segments.append(raw_data)
+                    y_labels.append(1)  # Seizure label
+
+        # Process interictal and postictal data
+        for state, data_source in [("interictal", seizure.interictal), ("postictal", seizure.postictal)]:
+            transformed_data = getattr(seizure, f"{state}_transformed")
+            raw_data = data_source
+            n_segments, n_channels, n_windows, n_features = transformed_data.shape
+
+            for segment_idx in range(n_segments):
+                for channel_idx in range(n_channels):
+                    # Get feature time series
+                    feature_array = transformed_data[segment_idx, channel_idx]
+
+                    # Get corresponding raw data
+                    segment_raw = raw_data[segment_idx, :, channel_idx]
+
+                    # Skip if not enough windows
+                    if n_windows < window_size:
+                        continue
+
+                    # Create sequences
+                    for i in range(0, n_windows - window_size + 1, sliding_step):
+                        sequence = feature_array[i:i + window_size]
+                        X_sequences.append(sequence)
+                        raw_segments.append(segment_raw)
+                        y_labels.append(0)  # Non-seizure label
+
+        # Convert to numpy arrays
+        feature_data = np.array(X_sequences)
+        raw_data = np.array(raw_segments)
+        labels = np.array(y_labels)
+
+        # Reshape for model compatibility
+        feature_data = np.transpose(feature_data, (0, 2, 1))  # [Samples, Features, Window_size]
+        raw_data = np.expand_dims(raw_data, axis=1)  # [Samples, 1, Time]
+
+        # Combine data (this approach concatenates along the channel dimension)
+        # You might need to adjust depending on your model architecture
+        # For example, you might need a different approach like having two inputs
+        # This is a simplistic approach assuming your model can handle varying channel counts
+        data = np.concatenate([raw_data, feature_data], axis=1)
+
     else:
-        n_removed = len(active_samples) - np.sum(active_samples)
-        print(f"Removed {n_removed} zero-padded samples out of {len(active_samples)} total samples")
-        seizure_data_flat = seizure_data_flat[active_samples]
-
-    # Create the labels
-    seizure_labels = np.ones(len(seizure_data_flat))
-    nonseizure_labels = np.zeros(len(nonseizure_data_flat))
-
-    # Combine the dataset and labels
-    data = np.concatenate((seizure_data_flat, nonseizure_data_flat), axis=0)
-    data = np.expand_dims(data, axis=2)  # Add channel dimension
-    data = np.transpose(data, (0, 2, 1))  # Transpose to [Sample, Channel, Time]
-    labels = np.concatenate((seizure_labels, nonseizure_labels), axis=0)
+        raise ValueError("Invalid input_type. Choose 'raw', 'transformed', or 'combined'.")
 
     # Shuffle the data
     shuffled_indices = np.random.permutation(len(data))
@@ -451,6 +664,159 @@ def combine_loaders(loader_list, batch_size=512):
     )
 
     return train_loader, val_loader
+
+
+def construct_single_dataset(results_propagation, window_size, overlap=0.5):
+    """
+    Constructs dataset by sliding window over smoothed probabilities to create N-second segments.
+
+    Args:
+        results_propagation: Dictionary containing smoothed_probabilities and true_seizure_channels
+        window_size: Size of window in seconds
+        overlap: Overlap fraction between consecutive windows (default 0.5 for 50% overlap)
+
+    Returns:
+        X: Array of resampled segments
+        y: Array of corresponding labels
+    """
+    # Get raw data excluding first 50 timepoints
+    raw_data = results_propagation['smoothed_probabilities'][50:, :]
+
+    # Calculate window parameters
+    window_length = window_size * 5  # 5 samples per second
+
+    # Check if data is long enough for at least one window
+    if len(raw_data) < window_length:
+        print(f"Warning: Data length {len(raw_data)} is shorter than window length {window_length}")
+        # Pad with zeros if needed
+        padding = np.zeros((window_length - len(raw_data), raw_data.shape[1]))
+        raw_data = np.vstack([raw_data, padding])
+
+    step_size = int(window_length * (1 - overlap))  # Step size based on overlap
+
+    # Ensure at least one complete segment
+    if step_size == 0:
+        step_size = 1
+
+    # Calculate number of complete segments
+    num_segments = (len(raw_data) - window_length) // step_size + 1
+
+    # If no complete segments possible, create just one segment
+    if num_segments <= 0:
+        num_segments = 1
+
+    # Initialize arrays
+    X = np.zeros((num_segments, window_length, raw_data.shape[1]))
+    y = np.zeros((num_segments, raw_data.shape[1]))
+
+    # Create segments using sliding window
+    for i in range(num_segments):
+        start_idx = i * step_size
+        end_idx = start_idx + window_length
+
+        # Handle case where end_idx exceeds data length
+        if end_idx > len(raw_data):
+            # Pad with zeros
+            segment = raw_data[start_idx:, :]
+            padding = np.zeros((end_idx - len(raw_data), raw_data.shape[1]))
+            X[i] = np.vstack([segment, padding])
+        else:
+            # Extract segment normally
+            X[i] = raw_data[start_idx:end_idx, :]
+
+        # Assign labels
+        y[i][results_propagation['true_seizure_channels']] = 1
+
+    X = np.transpose(X, (0, 2, 1))
+    # Combine the first two dimensions
+    X = np.concatenate([X[i] for i in range(X.shape[0])], axis=0)
+    y = y.flatten()
+
+    # print the shape of X
+
+    return X, y, X, y
+
+
+def construct_channel_recognition_dataset(results_propagation_total, seizure_onset_window_size=30, batch_size=64,
+                                          split=0.8, data_aug = False, **kwargs):
+    """
+    Constructs balanced datasets for seizure channel recognition and onset detection.
+
+    Args:
+        results_propagation_total: List of dictionaries containing seizure data
+        seizure_onset_window_size: Window size in seconds (default: 60)
+        batch_size: Size of training batches (default: 64)
+        split: Train/validation split ratio (default: 0.8)
+
+    Returns:
+        Four DataLoaders: train/val for channel recognition and train/val for onset detection
+    """
+
+    def process_dataset(x_data, y_data, split, batch_size):
+        """Helper function to reduce code duplication"""
+        # Balance dataset
+        pos_idx = np.where(y_data == 1)[0]
+        neg_idx = np.where(y_data == 0)[0]
+        n_samples = min(len(pos_idx), len(neg_idx))
+
+        # Sample equal numbers
+        indices = np.concatenate([
+            np.random.choice(pos_idx, n_samples, replace=False),
+            np.random.choice(neg_idx, n_samples, replace=False)
+        ])
+        indices = np.random.permutation(indices)
+
+        x_data, y_data = x_data[indices], y_data[indices]
+
+        # Split data
+        sss = StratifiedShuffleSplit(n_splits=1, test_size=1 - split, random_state=0)
+        train_idx, val_idx = next(sss.split(x_data, y_data))
+
+        # Create datasets and loaders
+        train_loader = DataLoader(
+            CustomDataset(x_data[train_idx], y_data[train_idx]),
+            batch_size=batch_size,
+            shuffle=True
+        )
+        val_loader = DataLoader(
+            CustomDataset(x_data[val_idx], y_data[val_idx]),
+            batch_size=1,
+            shuffle=True
+        )
+
+        return train_loader, val_loader
+
+    # Collect data from all samples
+    x_total, y_total = [], []
+    x_onset_total, y_onset_total = [], []
+
+    for results in results_propagation_total:
+        x, y, x_onset, y_onset = construct_single_dataset(
+            results,
+            seizure_onset_window_size
+        )
+        x_total.append(x)
+        y_total.append(y)
+        x_onset_total.append(x_onset)
+        y_onset_total.append(y_onset)
+
+    # Process channel recognition data
+    x_total = np.expand_dims(np.concatenate(x_total, axis=0), axis=1)
+    y_total = np.concatenate(y_total)
+
+    channel_train, channel_val = process_dataset(
+        x_total, y_total, split, batch_size
+    )
+
+    # Process onset detection data
+    x_onset_total = np.expand_dims(np.concatenate(x_onset_total, axis=0), axis=1)
+    y_onset_total = np.concatenate(y_onset_total)
+
+    onset_train, onset_val = process_dataset(
+        x_onset_total, y_onset_total, split, batch_size
+    )
+
+    return channel_train, channel_val, onset_train, onset_val
 
 
 if __name__ == "__main__":
