@@ -691,13 +691,13 @@ def setup_and_train_models(
         'Wavenet': lambda ch, ts, lr: Wavenet(input_dim=ch, output_dim=2, kernel_size=ts, lr=lr),
         'LSTM': lambda ch, ts, lr: LSTM(input_dim=ch, output_dim=2, lr=lr),
         'S4': lambda ch, ts, lr: S4Model(d_input=ch, d_output=2, lr=lr),
-        'ResNet': lambda ch, ts, lr: WaveResNet(in_channels=ch, n_classes=2, lr=lr, kernel_size=ts)
+        'ResNet': lambda ch, ts, lr: WaveResNet(input_dim=ch, n_classes=2, lr=lr, kernel_size=ts)
     }
 
     # Default parameters
     default_params = {
         'epochs': 40,
-        'checkpoint_freq': 5,
+        'checkpoint_freq': 10,
         'lr': 0.001,
         'batch_size': 4096,
         'device': 'cuda:0',

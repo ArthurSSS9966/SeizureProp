@@ -363,9 +363,6 @@ def create_dataset(seizure, train_percentage=0.8, batch_size=512, min_activity_t
         train_loader: DataLoader for training data
         val_loader: DataLoader for validation data
     """
-    from torch.utils.data import DataLoader, Dataset
-    import numpy as np
-    from sklearn.model_selection import StratifiedShuffleSplit
 
     # Define custom dataset class if not already defined
     class CustomDataset(Dataset):
@@ -441,14 +438,9 @@ def create_dataset(seizure, train_percentage=0.8, batch_size=512, min_activity_t
                     # Get feature time series for this segment and channel
                     feature_array = ictal_data[segment_idx, channel_idx]
 
-                    # Create sequences by sliding window
-                    for i in range(0, n_windows - window_size + 1, sliding_step):
-                        # Extract sequence
-                        sequence = feature_array[i:i + window_size]
-
-                        # Add to lists
-                        X_sequences.append(sequence)
-                        y_labels.append(1)  # Seizure label
+                    # Add to lists
+                    X_sequences.append(feature_array)
+                    y_labels.append(1)  # Seizure label
 
         # Process interictal data (non-seizure)
         interictal_data = seizure.interictal_transformed
@@ -462,14 +454,9 @@ def create_dataset(seizure, train_percentage=0.8, batch_size=512, min_activity_t
                     # Get feature time series for this segment and channel
                     feature_array = interictal_data[segment_idx, channel_idx]
 
-                    # Create sequences by sliding window
-                    for i in range(0, n_windows - window_size + 1, sliding_step):
-                        # Extract sequence
-                        sequence = feature_array[i:i + window_size]
-
-                        # Add to lists
-                        X_sequences.append(sequence)
-                        y_labels.append(0)  # Non-seizure label
+                    # Add to lists
+                    X_sequences.append(feature_array)
+                    y_labels.append(0)  # Non-seizure label
 
         # Process postictal data (also non-seizure but post-seizure)
         postictal_data = seizure.postictal_transformed
@@ -483,14 +470,9 @@ def create_dataset(seizure, train_percentage=0.8, batch_size=512, min_activity_t
                     # Get feature time series for this segment and channel
                     feature_array = postictal_data[segment_idx, channel_idx]
 
-                    # Create sequences by sliding window
-                    for i in range(0, n_windows - window_size + 1, sliding_step):
-                        # Extract sequence
-                        sequence = feature_array[i:i + window_size]
-
-                        # Add to lists
-                        X_sequences.append(sequence)
-                        y_labels.append(0)  # Non-seizure label (postictal)
+                    # Add to lists
+                    X_sequences.append(feature_array)
+                    y_labels.append(0)  # Non-seizure label (postictal)
 
         # Convert to numpy arrays
         data = np.array(X_sequences)

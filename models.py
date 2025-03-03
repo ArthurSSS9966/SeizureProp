@@ -328,10 +328,10 @@ class S4Model(nn.Module):
 class WaveResNet(nn.Module):
     def __init__(
             self,
-            in_channels=1,
-            base_filters=32,  # Reduced from 64
-            n_blocks=3,  # Reduced from 10
-            kernel_size=2,
+            input_dim=12,  # Number of input features
+            base_filters=32,
+            n_blocks=3,
+            kernel_size=16,
             n_classes=2,
             dropout=0.2,
             lr=0.001,
@@ -342,9 +342,12 @@ class WaveResNet(nn.Module):
 
         self.norm_layer = nn.BatchNorm1d if norm_type == 'batch' else nn.LayerNorm
 
-        # Initial causal conv
+        # Initial feature embedding layer to process all features together
+        self.feature_embedding = nn.Linear(input_dim, base_filters)
+
+        # Initial causal conv - works on the time dimension after feature embedding
         self.initial = nn.Sequential(
-            nn.Conv1d(in_channels, base_filters, kernel_size),
+            nn.Conv1d(base_filters, base_filters, kernel_size),
             self.norm_layer(base_filters),
             nn.ReLU(),
             nn.Dropout(dropout)
@@ -374,9 +377,25 @@ class WaveResNet(nn.Module):
 
     def forward(self, x):
         """
-        Input: (batch_size, 1, time_steps)
+        Input: (batch_size, features, time_steps)
         Output: (batch_size, n_classes)
         """
+        batch_size, n_features, time_steps = x.shape
+
+        # Reshape and transpose to apply feature embedding
+        # From [batch, features, time] to [batch * time, features]
+        x = x.permute(0, 2, 1).reshape(batch_size * time_steps, n_features)
+
+        # Apply feature embedding
+        x = self.feature_embedding(x)
+
+        # Reshape back to [batch, time, base_filters]
+        x = x.reshape(batch_size, time_steps, -1)
+
+        # Permute to [batch, base_filters, time] for conv1d operations
+        x = x.permute(0, 2, 1)
+
+        # Apply causal padding for initial conv
         x = F.pad(x, (1, 0))
         x = self.initial(x)
 
@@ -539,7 +558,7 @@ def train_using_optimizer(
                 for i, (x, y) in enumerate(pbar):
                     try:
                         # Move data to device
-                        x = x.to(device, non_blocking=True)
+                        x = x.float().to(device, non_blocking=True)
                         y = y.long().to(device, non_blocking=True)
 
                         # Zero gradients
@@ -724,7 +743,7 @@ def evaluate_model(
             for i, (x, y) in enumerate(itertools.islice(dataloader, num_batches)):
                 try:
                     # Move data to device
-                    x = x.to(device, non_blocking=True)
+                    x = x.float().to(device, non_blocking=True)
                     y = y.long().to(device, non_blocking=True)
 
                     # Handle empty batch
