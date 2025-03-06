@@ -2,11 +2,11 @@ import os
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy.signal import welch, decimate
-from sklearn.preprocessing import RobustScaler, StandardScaler
+from sklearn.preprocessing import RobustScaler
 from scipy import signal
 from scipy.fftpack import fft
 from statsmodels.tsa.ar_model import AutoReg
-# from meegkit import dss
+from meegkit import dss
 from tqdm import tqdm
 import pickle
 from typing import Tuple, Optional, List, Dict
@@ -15,6 +15,7 @@ import logging
 import torch
 import json
 import datetime
+import torch.nn as nn
 
 from utils import (butter_bandpass_filter,split_data, map_seizure_channels,
                    find_seizure_related_channels, map_channels_to_numbers)
@@ -23,7 +24,7 @@ from datasetConstruct import (combine_loaders,
                               load_seizure_across_patients, create_dataset,
                               EDFData, load_single_seizure)
 from models import (train_using_optimizer, evaluate_model, output_to_probability, Wavenet, CNN1D,
-                    LSTM, S4Model, WaveResNet)
+                    LSTM, S4Model, ResNet, hyperparameter_search_for_model)
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -199,8 +200,8 @@ class SignalProcessor:
         for e in tqdm(gridmap['Channel'], desc="Removing line noise"):
             start, end = map(int, e.split(':'))
             section = cleaned_data[:, start:end + 1]
-            # for f0 in line_freqs:
-            #     section, _ = dss.dss_line_iter(section, f0, fs)
+            for f0 in line_freqs:
+                section, _ = dss.dss_line_iter(section, f0, fs)
             cleaned_data[:, start:end + 1] = section
         return cleaned_data
 
@@ -214,8 +215,6 @@ def preprocessing(dataset, data_folder: str):
         data_dict = {
             'ictal': dataset.ictal,
             'postictal': dataset.postictal,
-            'preictal2': dataset.preictal2,
-            'postictal2': dataset.postictal2,
             'interictal': dataset.interictal,
         }
 
@@ -239,16 +238,16 @@ def preprocessing(dataset, data_folder: str):
         for key in data_dict:
             for i in range(data_dict[key].shape[1]):
                 data_dict[key][:, i] = butter_bandpass_filter(
-                    data_dict[key][:, i], lowcut=1, highcut=127, fs=dataset.samplingRate
+                    data_dict[key][:, i], lowcut=1, highcut=255, fs=dataset.samplingRate
                 )
 
         # Downsample
         try:
-            factor = dataset.samplingRate // 128
+            factor = dataset.samplingRate // 512
             for key in data_dict:
                 data_dict[key] = decimate(data_dict[key], factor, axis=0)
             dataset.downsample = True
-            dataset.samplingRate = 128
+            dataset.samplingRate = 512
         except Exception as e:
             logger.warning(f"Downsampling failed: {str(e)}")
 
@@ -292,7 +291,7 @@ class EEGTimeSeriesFeatureExtractor:
     - Frequency band powers (delta, theta, alpha, beta, gamma)
     """
 
-    def __init__(self, sampling_rate=256, window_duration=0.05, window_step=0.025):
+    def __init__(self, sampling_rate=128, window_duration=0.05, window_step=0.025):
         """
         Initialize the feature extractor with moving window parameters.
 
@@ -314,29 +313,25 @@ class EEGTimeSeriesFeatureExtractor:
             'high_gamma': (100, 200),
         }
 
-    def extract_half_wave_features(self, signal_window):
+    def extract_half_wave_features(self, signal_window, amplitude_threshold=0.1):
         """
-        Extract features based on half-wave analysis.
+        Extract features based on half-wave analysis with amplitude thresholding.
 
         Args:
             signal_window: 1D array of signal values
+            amplitude_threshold: Minimum amplitude (in units of the signal) to consider a half-wave
 
         Returns:
             Dictionary of half-wave features
         """
-        # Apply bandpass filter (1-30Hz is typical for seizure detection)
-        sos = signal.butter(4, [1, 30], 'bandpass', fs=self.sampling_rate, output='sos')
-        filtered_signal = signal.sosfilt(sos, signal_window)
-
         # Find zero crossings
-        zero_crossings = np.where(np.diff(np.signbit(filtered_signal)))[0]
+        zero_crossings = np.where(np.diff(np.signbit(signal_window)))[0]
 
         # If no zero crossings found, return zeros
         if len(zero_crossings) <= 1:
             return {
                 'hw_count': 0,
                 'hw_mean_amp': 0,
-                'hw_max_amp': 0,
                 'hw_mean_duration': 0
             }
 
@@ -350,18 +345,21 @@ class EEGTimeSeriesFeatureExtractor:
 
             # Calculate half-wave duration in samples
             duration = end_idx - start_idx
-            half_wave_durations.append(duration)
 
             # Get max amplitude in this half-wave
-            segment = filtered_signal[start_idx:end_idx]
+            segment = signal_window[start_idx:end_idx]
             if len(segment) > 0:
-                half_wave_amps.append(np.max(np.abs(segment)))
+                amplitude = np.max(np.abs(segment))
+
+                # Only include half-waves that exceed the amplitude threshold
+                if amplitude >= amplitude_threshold:
+                    half_wave_amps.append(amplitude)
+                    half_wave_durations.append(duration)
 
         # Return features
         return {
             'hw_count': len(half_wave_amps),
             'hw_mean_amp': np.mean(half_wave_amps) if half_wave_amps else 0,
-            'hw_max_amp': np.max(half_wave_amps) if half_wave_amps else 0,
             'hw_mean_duration': np.mean(half_wave_durations) / self.sampling_rate if half_wave_durations else 0
         }
 
@@ -583,6 +581,10 @@ class EEGTimeSeriesFeatureExtractor:
             for j, feature_name in enumerate(feature_names):
                 feature_array[i, j] = features[feature_name]
 
+        # Normalize feature array for each feature
+        scaler = RobustScaler()
+        feature_array = scaler.fit_transform(feature_array)
+
         return feature_array, feature_names, window_times
 
 
@@ -653,9 +655,10 @@ def extract_sEEG_features(seizure_object, sampling_rate=128, window_duration=0.0
         # Store transformed data in the object
         setattr(seizure_object, f"{state}_transformed", transformed_data)
         setattr(seizure_object, f"{state}_window_times", window_times_data)
+        setattr(seizure_object, f"{state}_feature_samplingRate", int(1/window_step))
 
     # Save seizure object
-    save_path = f"data/P{seizure_object.patNo}/seizure_combined.pkl"
+    save_path = os.path.join(f'data/P{seizure_object.patNo}', f"seizure_{seizure_object.seizureNumber}_combined.pkl")
     with open(save_path, 'wb') as f:
         pickle.dump(seizure_object, f)
 
@@ -668,11 +671,14 @@ def setup_and_train_models(
         model_names: list = None,
         train: bool = False,
         input_type='raw',
-        data_aug = False,
-        params: dict = None
+        data_aug=False,
+        params: dict = None,
+        hyperparameter_search: bool = False,
+        n_trials: int = 20,
+        search_space: dict = None
 ):
     """
-    Set up and train selected models for seizure detection
+    Set up and train selected models for seizure detection with optional hyperparameter search
 
     Args:
         data_folder: Path to data folder
@@ -680,7 +686,12 @@ def setup_and_train_models(
         model_names: List of model names to use ['CNN1D', 'Wavenet', 'LSTM']
                     If None, uses all available models
         train: Whether to train models or load pretrained weights
+        input_type: Type of input data ('raw', 'transformed', or 'combined')
+        data_aug: Whether to use data augmentation
         params: Dictionary of training parameters (optional)
+        hyperparameter_search: Whether to perform hyperparameter search
+        n_trials: Number of trials for hyperparameter search
+        search_space: Dictionary defining the hyperparameter search space (optional)
 
     Returns:
         dict: Dictionary containing trained models and their performance metrics
@@ -691,7 +702,7 @@ def setup_and_train_models(
         'Wavenet': lambda ch, ts, lr: Wavenet(input_dim=ch, output_dim=2, kernel_size=ts, lr=lr),
         'LSTM': lambda ch, ts, lr: LSTM(input_dim=ch, output_dim=2, lr=lr),
         'S4': lambda ch, ts, lr: S4Model(d_input=ch, d_output=2, lr=lr),
-        'ResNet': lambda ch, ts, lr: WaveResNet(input_dim=ch, n_classes=2, lr=lr, kernel_size=ts)
+        'ResNet': lambda ch, ts, lr: ResNet(input_dim=ch, n_classes=2, lr=lr, kernel_size=ts, base_filters=32)
     }
 
     # Default parameters
@@ -700,8 +711,9 @@ def setup_and_train_models(
         'checkpoint_freq': 10,
         'lr': 0.001,
         'batch_size': 4096,
-        'device': 'cuda:0',
+        'device': 'cuda:0' if torch.cuda.is_available() else 'cpu',
         'patience': 7,
+        'scheduler_patience': 5,
         'gradient_clip': 1.0
     }
 
@@ -729,7 +741,11 @@ def setup_and_train_models(
         ml_datasets = [create_dataset(seizure, batch_size=batch_size, input_type=input_type)
                        for seizure in seizure_across_patients]
         train_loader, val_loader = combine_loaders(ml_datasets, batch_size=batch_size)
-        channels, time_steps = train_loader.dataset[0][0].shape
+
+        # Get the shape from a sample
+        sample_batch = next(iter(train_loader))
+        channels, time_steps = sample_batch[0][0].shape
+
         return train_loader, val_loader, channels, time_steps
 
     def initialize_models(model_names: list, channels: int, time_steps: int, lr: float):
@@ -745,18 +761,90 @@ def setup_and_train_models(
             data_folder, params['batch_size']
         )
 
-        # Initialize models
-        models = initialize_models(model_names, channels, time_steps, params['lr'])
-
         # Dictionary to store results
         results = {
-            'models': models,
+            'models': {},
             'training_history': {},
             'performance': {},
-            'parameters': params
+            'parameters': params,
+            'best_hyperparameters': {}
         }
 
-        if train:
+        # Initialize default search space if not provided
+        if search_space is None:
+            search_space = {
+                'lr': {'type': 'loguniform', 'range': [1e-5, 1e-2]},
+                'batch_size': {'type': 'categorical', 'values': [512, 1024, 2048, 4096]},
+                'gradient_clip': {'type': 'uniform', 'range': [0.1, 2.0]},
+                'dropout': {'type': 'uniform', 'range': [0.1, 0.5]},
+                'kernel_size': {'type': 'categorical', 'values': [32, 64, 128, 256, 512]},
+            }
+
+        # If hyperparameter search is enabled, find the best parameters for each model
+        if hyperparameter_search and train:
+            for model_name in model_names:
+                print(f"\nPerforming hyperparameter search for {model_name}...")
+
+                # Setup hyperparameter search for the current model
+                best_params = hyperparameter_search_for_model(
+                    model_name=model_name,
+                    model_creator=AVAILABLE_MODELS[model_name],
+                    train_loader=train_loader,
+                    val_loader=val_loader,
+                    channels=channels,
+                    time_steps=time_steps,
+                    n_trials=n_trials,
+                    search_space=search_space,
+                    device=params['device'],
+                    model_folder=model_folder
+                )
+
+                # Update the parameters for this model
+                model_params = params.copy()
+                model_params.update(best_params)
+                results['best_hyperparameters'][model_name] = best_params
+
+                # Initialize model with best parameters
+                model = AVAILABLE_MODELS[model_name](channels, time_steps, model_params['lr'])
+
+                # Update model configuration if needed
+                if 'dropout' in best_params and hasattr(model, 'dropout'):
+                    # Attempt to set dropout - implementation depends on model architecture
+                    try:
+                        for module in model.modules():
+                            if isinstance(module, nn.Dropout):
+                                module.p = best_params['dropout']
+                    except:
+                        logger.warning(f"Could not set dropout for {model_name}")
+
+                # Train the model with the best parameters
+                print(f"\nTraining {model_name} with best parameters: {best_params}")
+                train_loss, val_loss, val_accuracy = train_using_optimizer(
+                    model=model,
+                    trainloader=train_loader,
+                    valloader=val_loader,
+                    save_location=model_folder,
+                    epochs=params['epochs'],
+                    device=params['device'],
+                    patience=model_params['patience'],
+                    scheduler_patience=model_params.get('scheduler_patience', 5),
+                    gradient_clip=model_params['gradient_clip'],
+                    checkpoint_freq=params['checkpoint_freq']
+                )
+
+                results['models'][model_name] = model
+                results['training_history'][model_name] = {
+                    'train_loss': train_loss,
+                    'val_loss': val_loss,
+                    'val_accuracy': val_accuracy
+                }
+
+        elif train:
+            # Standard training without hyperparameter search
+            # Initialize models
+            models = initialize_models(model_names, channels, time_steps, params['lr'])
+            results['models'] = models
+
             # Train each model
             for name, model in models.items():
                 print(f"\nTraining {name}...")
@@ -769,6 +857,7 @@ def setup_and_train_models(
                     epochs=params['epochs'],
                     device=params['device'],
                     patience=params['patience'],
+                    scheduler_patience=params['scheduler_patience'],
                     gradient_clip=params['gradient_clip'],
                     checkpoint_freq=params['checkpoint_freq']
                 )
@@ -780,18 +869,22 @@ def setup_and_train_models(
                 }
 
         else:
+            # Load pretrained models
+            models = initialize_models(model_names, channels, time_steps, params['lr'])
+            results['models'] = models
+
             # Load pretrained weights
             for name, model in models.items():
                 checkpoint_path = os.path.join(model_folder, f"{name}_best.pth")
                 if os.path.exists(checkpoint_path):
-                    model.load_state_dict(
-                        torch.load(checkpoint_path)['model_state_dict']
-                    )
+                    checkpoint = torch.load(checkpoint_path, map_location=params['device'])
+                    model.load_state_dict(checkpoint['model_state_dict'])
+                    print(f"Loaded checkpoint for {name}")
                 else:
                     print(f"Warning: No checkpoint found for {name}")
 
         # Evaluate all models
-        for name, model in models.items():
+        for name, model in results['models'].items():
             loss, accuracy = evaluate_model(model, val_loader, params['device'])
             results['performance'][name] = {
                 'loss': loss,
@@ -809,7 +902,7 @@ def setup_and_train_models(
             plt.xlabel("Epoch")
             plt.ylabel("Loss")
             plt.title("Training Loss vs Epoch")
-            plt.savefig(os.path.join(model_folder, f'{name}training_loss.png'))
+            plt.savefig(os.path.join(model_folder, 'training_loss.png'))
             plt.close()
 
             # Plot validation accuracy
@@ -821,13 +914,15 @@ def setup_and_train_models(
             plt.xlabel("Epoch")
             plt.ylabel("Accuracy")
             plt.title("Validation Accuracy vs Epoch")
-            plt.savefig(os.path.join(model_folder, f'{name}validation_accuracy.png'))
+            plt.savefig(os.path.join(model_folder, 'validation_accuracy.png'))
             plt.close()
 
-        return results, models
+        return results, results['models']
 
     except Exception as e:
-        print(f"Error in setup and training: {str(e)}")
+        logger.error(f"Error in setup and training: {str(e)}")
+        import traceback
+        traceback.print_exc()
         raise
 
 
@@ -890,30 +985,83 @@ def analyze_seizure_propagation(
         # Load seizure data
         seizure_obj = load_single_seizure(single_seizure_folder, seizure_no)
 
+        if not hasattr(seizure_obj, 'ictal_transformed'):
+            seizure_obj = extract_sEEG_features(seizure_obj, sampling_rate=seizure_obj.samplingRate)
+
         return seizure_obj, seizure_channels, seizure_onset_channels
 
     def process_data(seizure_obj) -> Tuple[np.ndarray, np.ndarray, float]:
         """Process raw seizure data"""
         fs = seizure_obj.samplingRate
-        ictal_data = seizure_obj.ictal
-        preictal_data = seizure_obj.preictal2
+        if not hasattr(seizure_obj, 'ictal_transformed'):
+            ictal_data = seizure_obj.ictal_
+            preictal_data = seizure_obj.preictal2
 
-        # Reshape and combine data
-        ictal_combined = ictal_data.reshape(-1, ictal_data.shape[2])
-        total_data = np.concatenate((preictal_data, ictal_combined), axis=0)
+            # Reshape and combine data
+            ictal_combined = ictal_data.reshape(-1, ictal_data.shape[2])
+            total_data = np.concatenate((preictal_data, ictal_combined), axis=0)
+
+        else:
+            ictal_data = seizure_obj.ictal_transformed
+            preictal_data = seizure_obj.interictal_transformed
+
+            # Reshape and combine data
+            ictal_combined = ictal_data.transpose(0, 2, 1, 3).reshape(ictal_data.shape[0] * ictal_data.shape[2],
+                                                                      ictal_data.shape[1], ictal_data.shape[3])
+            preictal_data = preictal_data.transpose(0, 2, 1, 3).reshape(preictal_data.shape[0] * preictal_data.shape[2],
+                                                                        preictal_data.shape[1], preictal_data.shape[3])
+
+            total_data = np.concatenate((preictal_data, ictal_combined))
 
         # Split data into windows
-        total_windows = split_data(total_data, fs, overlap=params['overlap'])
+        total_windows = split_data(total_data, 40, overlap=params['overlap'])
 
         return total_data, total_windows, fs
 
     def compute_probabilities(data: np.ndarray, model, device: str) -> np.ndarray:
-        """Compute seizure probabilities for each channel"""
-        prob_matrix = np.zeros((data.shape[0], data.shape[2]))
+        """
+        Compute seizure probabilities for each channel.
 
-        for channel in range(data.shape[2]):
-            input_data = data[:, :, channel].reshape(-1, 1, data.shape[1])
+        Parameters:
+        -----------
+        data : numpy.ndarray
+            Input data with shape (chunks, fs, channel) or (chunks, fs, channel, features)
+        model : torch model
+            The seizure detection model
+        device : str
+            The device to run the model on ('cpu' or 'cuda')
+
+        Returns:
+        --------
+        numpy.ndarray
+            Probability matrix with shape (chunks, channel)
+        """
+        # Determine if the input is 3D or 4D
+        is_4d = len(data.shape) == 4
+
+        # Get dimensions
+        chunks = data.shape[0]
+        fs = data.shape[1]
+        n_channels = data.shape[2]
+
+        # Initialize probability matrix
+        prob_matrix = np.zeros((chunks, n_channels))
+
+        for channel in range(n_channels):
+            if is_4d:
+                # 4D data: [chunks, fs, channel, features]
+                channel_data = data[:, :, channel, :]
+                input_data = np.transpose(channel_data, (0, 2, 1))
+            else:
+                # 3D data: [chunks, fs, channel]
+                # Extract and reshape to [chunks, 1, fs]
+                channel_data = data[:, :, channel]
+                input_data = channel_data.reshape(chunks, 1, fs)  # [chunks, 1, fs]
+
+            # Convert to tensor and move to device
             input_data = torch.tensor(input_data, dtype=torch.float32).to(device)
+
+            # Compute probabilities
             prob_matrix[:, channel] = output_to_probability(model, input_data, device)
 
         return prob_matrix

@@ -3,7 +3,7 @@ import torch.nn.functional as F
 import torch.optim as optim
 import torch
 import itertools
-from typing import Tuple, List, Optional
+from typing import List, Tuple, Callable, Optional
 from pathlib import Path
 from tqdm import tqdm
 import numpy as np
@@ -12,6 +12,11 @@ from torch.utils.data import DataLoader
 import logging
 from s4 import S4Block
 from s4d import S4D
+import optuna
+from optuna.visualization import plot_optimization_history, plot_param_importances
+from optuna.pruners import MedianPruner
+from optuna.samplers import TPESampler
+import os
 
 logger = logging.getLogger(__name__)
 
@@ -325,7 +330,7 @@ class S4Model(nn.Module):
         return output
 
 
-class WaveResNet(nn.Module):
+class ResNet(nn.Module):
     def __init__(
             self,
             input_dim=12,  # Number of input features
@@ -661,6 +666,135 @@ def train_using_optimizer(
     except Exception as e:
         logger.error(f"Training failed: {str(e)}")
         raise
+
+
+def hyperparameter_search_for_model(
+        model_name: str,
+        model_creator: Callable,
+        train_loader,
+        val_loader,
+        channels: int,
+        time_steps: int,
+        n_trials: int,
+        search_space: dict,
+        device: str,
+        model_folder: str
+) -> dict:
+    """
+    Perform hyperparameter search for a specific model using Optuna.
+
+    Args:
+        model_name: Name of the model
+        model_creator: Function to create the model
+        train_loader: DataLoader for training data
+        val_loader: DataLoader for validation data
+        channels: Number of input channels
+        time_steps: Number of time steps
+        n_trials: Number of trials for hyperparameter search
+        search_space: Dictionary defining the search space
+        device: Device to use for training
+        model_folder: Path to save study results
+
+    Returns:
+        dict: Dictionary of best hyperparameters
+    """
+
+    def objective(trial):
+        # Create hyperparameters from search space
+        hp = {}
+
+        for param_name, config in search_space.items():
+            if config['type'] == 'loguniform':
+                hp[param_name] = trial.suggest_float(param_name, *config['range'], log=True)
+            elif config['type'] == 'uniform':
+                hp[param_name] = trial.suggest_float(param_name, *config['range'])
+            elif config['type'] == 'int':
+                hp[param_name] = trial.suggest_int(param_name, *config['range'])
+            elif config['type'] == 'categorical':
+                hp[param_name] = trial.suggest_categorical(param_name, config['values'])
+
+        # Create the model
+        model = model_creator(channels, time_steps, hp.get('lr', 0.001))
+
+        # Apply dropout if the model supports it
+        if 'dropout' in hp:
+            try:
+                for module in model.modules():
+                    if isinstance(module, nn.Dropout):
+                        module.p = hp['dropout']
+            except:
+                pass  # Silently fail if dropout can't be set
+
+        # Mini training with early stopping for quick evaluation
+        mini_epochs = min(15, n_trials)  # Reduced number of epochs for quick evaluation
+
+        try:
+            # Create a temporary directory for checkpoints
+            temp_dir = os.path.join(model_folder, f"optuna_trial_{trial.number}")
+            os.makedirs(temp_dir, exist_ok=True)
+
+            # Train with limited epochs for hyperparameter search
+            _, val_losses, val_accuracies = train_using_optimizer(
+                model=model,
+                trainloader=train_loader,
+                valloader=val_loader,
+                save_location=temp_dir,
+                epochs=mini_epochs,
+                device=device,
+                patience=hp.get('patience', 5),
+                scheduler_patience=hp.get('scheduler_patience', 3),
+                gradient_clip=hp.get('gradient_clip', 1.0),
+                checkpoint_freq=1  # Evaluate at every epoch for optuna
+            )
+
+            # Use the best validation accuracy as the objective
+            trial.set_user_attr('val_losses', val_losses)
+
+            if val_accuracies:
+                best_acc = max(val_accuracies)
+                return best_acc
+            else:
+                return 0.0  # In case no validation was performed
+
+        except Exception as e:
+            logger.error(f"Error in trial: {str(e)}")
+            # Return a very poor score to avoid this configuration
+            return 0.0
+
+    # Create a study for hyperparameter optimization
+    pruner = MedianPruner(n_startup_trials=5, n_warmup_steps=5)
+    sampler = TPESampler(seed=42)
+
+    study = optuna.create_study(
+        direction="maximize",  # Maximize validation accuracy
+        pruner=pruner,
+        sampler=sampler
+    )
+
+    # Run the optimization
+    study.optimize(objective, n_trials=n_trials)
+
+    # Save study results
+    if not os.path.exists(model_folder):
+        os.makedirs(model_folder)
+
+    # Save visualization
+    try:
+        fig1 = plot_optimization_history(study)
+        fig1.write_image(os.path.join(model_folder, f"{model_name}_optimization_history.png"))
+
+        fig2 = plot_param_importances(study)
+        fig2.write_image(os.path.join(model_folder, f"{model_name}_param_importances.png"))
+    except Exception as e:
+        logger.warning(f"Could not generate Optuna visualizations: {str(e)}")
+
+    # Print results
+    print(f"\nBest trial for {model_name}:")
+    trial = study.best_trial
+    print(f"  Value: {trial.value}")
+    print(f"  Params: {trial.params}")
+
+    return trial.params
 
 
 def output_to_probability(model, x, device='cuda:0'):

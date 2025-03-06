@@ -139,35 +139,27 @@ def reconsEDF(raw, gridmap, PAT_NO):
     SZOFF_time = int(raw.annotations.onset[SZOFF_ind] * samplingRate)
 
     # Define the preictal range
-    preictal_range = int(60*raw.info["sfreq"])  # 60 seconds before EOF and after SOF, also 60 seconds before Seizure
-    pre_range = int(10*raw.info["sfreq"])  # 10 seconds before EOF and after SOF, also 10 seconds before Seizure
-    postictal_range = int(np.min([60*raw.info["sfreq"], data.shape[0] - SZOFF_time]))  # 60 seconds after EOF and before SOF
+    pre_range = int(60*raw.info["sfreq"])  # 10 seconds before EOF and after SOF, also 10 seconds before Seizure
 
     # Extract the preictal and ictal data
-    preictal_data = data[:preictal_range, :]
-    postictal_data = data[postictal_range:, :]
     ictal_data = data[SZ_time:SZOFF_time, :]
-    preictal_data2 = data[SZ_time-pre_range:SZ_time, :]
-    postictal_data2 = data[SZOFF_time:SZOFF_time+pre_range, :]
+    preictal_data2 = data[SZ_time-pre_range:SZ_time, :] if SZ_time-pre_range > 0 else data[:SZ_time-int(5*raw.info["sfreq"]), :]
+    postictal_data2 = data[SZOFF_time:SZOFF_time+pre_range, :] if SZOFF_time+pre_range < data.shape[0] else data[SZOFF_time+int(5*raw.info["sfreq"]):, :]
 
     # Constrcut the dataset
     dataset = EDFData(gridmap, filename, PAT_NO)
     dataset.channelNumber = data.shape[1]
     dataset.samplingRate = samplingRate
     dataset.ictal = ictal_data
-    dataset.interictal = preictal_data
-    dataset.postictal = postictal_data
-    dataset.preictal2 = preictal_data2
-    dataset.postictal2 = postictal_data2
+    dataset.interictal = preictal_data2
+    dataset.postictal = postictal_data2
     dataset.annotations = raw.annotations.description
     dataset.annotations_onset = raw.annotations.onset
     dataset.channel_names = raw.ch_names
     # Add documentation to each variable
     dataset.documentation= ("ictal: Data during seizure\n,"
-                            "preictal: 60 seconds free of seizure Data before seizure\n,"
-                            "postictal: 60 seconds free of seizure Data after seizure\n,"
-                            "preictal2: 10 seconds Data right before seizure\n,"
-                            "postictal2: 10 seconds Data right after seizure"
+                            "preictal: 55-60 seconds free of seizure Data before seizure\n,"
+                            "postictal: 55-60 seconds free of seizure Data after seizure\n,"
                             )
 
     return dataset
@@ -264,16 +256,10 @@ def load_seizure(path):
         raw.interictal = split_data(raw.interictal, raw.samplingRate)
         raw.ictal = split_data(raw.ictal, raw.samplingRate)
         raw.postictal = split_data(raw.postictal, raw.samplingRate)
-        raw.preictal2 = split_data(raw.preictal2, raw.samplingRate)
-        raw.postictal2 = split_data(raw.postictal2, raw.samplingRate)
 
         # Initialize combined data with the first seizure
         if seizure_data_combined.patNo is None:
             seizure_data_combined = raw
-            seizure_data_combined.interictal = np.concatenate((seizure_data_combined.interictal,
-                                                               raw.preictal2), axis=0)
-            seizure_data_combined.postictal = np.concatenate((seizure_data_combined.postictal,
-                                                              raw.postictal2), axis=0)
         else:
             # Check if dimensions match
             if raw.ictal.shape[2] != seizure_data_combined.ictal.shape[2]:
@@ -298,9 +284,9 @@ def load_seizure(path):
             # Combine the data
             seizure_data_combined.ictal = np.vstack((seizure_data_combined.ictal, raw.ictal))
             seizure_data_combined.interictal = np.vstack((seizure_data_combined.interictal,
-                                                          raw.interictal, raw.preictal2))
+                                                          raw.interictal))
             seizure_data_combined.postictal = np.vstack((seizure_data_combined.postictal,
-                                                         raw.postictal, raw.postictal2))
+                                                         raw.postictal))
 
     seizure_data_combined.seizureNumber = 'All'
     return seizure_data_combined
@@ -314,8 +300,8 @@ def load_seizure_across_patients(data_folder):
         if not os.path.isdir(os.path.join(data_folder, folder)) or not folder.startswith("P"):
             continue
         # if there is a file called seizure_combined
-        if os.path.exists(os.path.join(data_folder, folder, "seizure_combined.pkl")):
-            seizure_single = pickle.load(open(os.path.join(data_folder, folder, "seizure_combined.pkl"), "rb"))
+        if os.path.exists(os.path.join(data_folder, folder, "seizure_All_combined.pkl")):
+            seizure_single = pickle.load(open(os.path.join(data_folder, folder, "seizure_All_combined.pkl"), "rb"))
             seizure_data_combined.append(seizure_single)
         else:
             seizure_single = load_seizure(os.path.join(data_folder, folder))
@@ -332,14 +318,17 @@ def load_single_seizure(path, seizure_number):
     :return: Tuple of (raw, gridmap)
     """
 
-    # Find all seizure data that ends with CLEANED.pkl and does not have STIM in the name
-    cleaned_file = [f for f in os.listdir(path) if f.endswith("CLEANED.pkl") and f.startswith(f"seizure_SZ{seizure_number}")]
+    if os.path.exists(os.path.join(path, f"seizure_SZ{seizure_number}_combined.pkl")):
+        raw = pickle.load(open(os.path.join(path, f"seizure_SZ{seizure_number}_combined.pkl"), "rb"))
+    else:
+        # Find all seizure data that ends with CLEANED.pkl and does not have STIM in the name
+        cleaned_file = [f for f in os.listdir(path) if f.endswith("CLEANED.pkl") and f.startswith(f"seizure_SZ{seizure_number}")]
 
-    raw = pickle.load(open(os.path.join(path, cleaned_file[0]), "rb"))
+        raw = pickle.load(open(os.path.join(path, cleaned_file[0]), "rb"))
 
-    raw.interictal = split_data(raw.interictal, raw.samplingRate)
-    raw.ictal = split_data(raw.ictal, raw.samplingRate)
-    raw.postictal = split_data(raw.postictal, raw.samplingRate)
+        raw.interictal = split_data(raw.interictal, raw.samplingRate)
+        raw.ictal = split_data(raw.ictal, raw.samplingRate)
+        raw.postictal = split_data(raw.postictal, raw.samplingRate)
 
     return raw
 
@@ -804,38 +793,39 @@ def construct_channel_recognition_dataset(results_propagation_total, seizure_ons
 if __name__ == "__main__":
     DATA_FOLDER = "D:/Blcdata/seizure"
     OUTPUT_FOLDER = "data"
-    PAT_NO = 65
+    PAT_NOs = [62, 65, 66]
 
-    # Load the data
-    data_folder = os.path.join(DATA_FOLDER, "P0{:02d}".format(PAT_NO))
+    for PAT_NO in PAT_NOs:
+        # Load the data
+        data_folder = os.path.join(DATA_FOLDER, "P0{:02d}".format(PAT_NO))
 
-    # Load .txt grid map file
-    gridmap_loc = f"gridmap.P0{PAT_NO}.txt"
-    gridmap_loc = os.path.join(data_folder, gridmap_loc)
-    gridmap = pd.read_csv(gridmap_loc, sep=",")
+        # Load .txt grid map file
+        gridmap_loc = f"gridmap.P0{PAT_NO}.txt"
+        gridmap_loc = os.path.join(data_folder, gridmap_loc)
+        gridmap = pd.read_csv(gridmap_loc, sep=",")
 
-    # Load the edf data file
-    seizurefiles = [f for f in os.listdir(data_folder) if f.lower().endswith(".edf")]
+        # Load the edf data file
+        seizurefiles = [f for f in os.listdir(data_folder) if f.lower().endswith(".edf")]
 
-    for file in seizurefiles:
+        for file in seizurefiles:
 
-        # try:
+            # try:
 
-        data = mne.io.read_raw_edf(os.path.join(data_folder, file))
+            data = mne.io.read_raw_edf(os.path.join(data_folder, file))
 
-        dataset = reconsEDF(data, gridmap, PAT_NO)
-        output_dir = os.path.join(OUTPUT_FOLDER, f"P{PAT_NO}")
+            dataset = reconsEDF(data, gridmap, PAT_NO)
+            output_dir = os.path.join(OUTPUT_FOLDER, f"P{PAT_NO}")
 
-        # Save the data to a new file
-        if not os.path.exists(output_dir):
-            print(f"Creating directory {output_dir}")
-            os.makedirs(output_dir)
+            # Save the data to a new file
+            if not os.path.exists(output_dir):
+                print(f"Creating directory {output_dir}")
+                os.makedirs(output_dir)
 
-        output_file = os.path.join(output_dir, f"seizure_{dataset['seizureNumber']}.pkl")
-        with open(output_file, "wb") as f:
-            pickle.dump(dataset, f)
-            print(f"Data for seizure {dataset['seizureNumber']} saved to {output_file}")
+            output_file = os.path.join(output_dir, f"seizure_{dataset['seizureNumber']}.pkl")
+            with open(output_file, "wb") as f:
+                pickle.dump(dataset, f)
+                print(f"Data for seizure {dataset['seizureNumber']} saved to {output_file}")
 
-        # except Exception as e:
-        #     print(f"Error processing file {file}: {e}")
-        #     continue
+            # except Exception as e:
+            #     print(f"Error processing file {file}: {e}")
+            #     continue

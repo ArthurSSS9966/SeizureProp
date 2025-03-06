@@ -134,14 +134,15 @@ def find_seizure_annotations(raw):
 
 def split_data(data, fs, overlap=0):
     '''
-    Function to split 2D data into chunks of size fs with specified overlap
+    Function to split data into chunks of size fs with specified overlap.
+    Works with both 2D arrays (time, channel) and 3D arrays (time, channel, feature).
 
     Parameters:
     -----------
     data : numpy.ndarray
-        Input 2D data to be split, shape (samples, features)
+        Input data to be split, shape (time, channel) or (time, channel, feature)
     fs : int
-        Window size (number of samples per chunk)
+        Window size (number of time steps per chunk)
     overlap : float
         Overlap between consecutive windows (0 to 1), default is 0
         e.g., 0.5 means 50% overlap
@@ -149,7 +150,9 @@ def split_data(data, fs, overlap=0):
     Returns:
     --------
     numpy.ndarray
-        Array of overlapped chunks with shape (n_chunks, fs, n_features)
+        Array of overlapped chunks with shape:
+        - For 2D input: (n_chunks, fs, n_channels)
+        - For 3D input: (n_chunks, fs, n_channels, n_features)
     '''
     if not 0 <= overlap < 1:
         raise ValueError("Overlap must be between 0 and 1")
@@ -160,17 +163,34 @@ def split_data(data, fs, overlap=0):
     # Calculate number of chunks
     n_chunks = ((len(data) - fs) // step) + 1
 
-    # Get the number of features (columns) in the data
-    n_features = data.shape[1]
+    # Determine if the input is 2D or 3D
+    is_3d = len(data.shape) == 3
 
-    # Prepare output array with correct shape
-    chunks = np.zeros((n_chunks, fs, n_features))
+    if is_3d:
+        # 3D data: (time, channel, feature)
+        n_channels = data.shape[1]
+        n_features = data.shape[2]
 
-    # Fill chunks using sliding window
-    for i in range(n_chunks):
-        start_idx = i * step
-        end_idx = start_idx + fs
-        chunks[i] = data[start_idx:end_idx, :]
+        # Prepare output array with correct shape for 3D
+        chunks = np.zeros((n_chunks, fs, n_channels, n_features))
+
+        # Fill chunks using sliding window
+        for i in range(n_chunks):
+            start_idx = i * step
+            end_idx = start_idx + fs
+            chunks[i] = data[start_idx:end_idx, :, :]
+    else:
+        # 2D data: (time, channel)
+        n_channels = data.shape[1]
+
+        # Prepare output array with correct shape for 2D
+        chunks = np.zeros((n_chunks, fs, n_channels))
+
+        # Fill chunks using sliding window
+        for i in range(n_chunks):
+            start_idx = i * step
+            end_idx = start_idx + fs
+            chunks[i] = data[start_idx:end_idx, :]
 
     return chunks
 
