@@ -95,9 +95,9 @@ def plot_eeg_style(data, sampling_rate=None, spacing_factor=1,
         time = np.arange(n_samples)
 
     # Calculate spacing
-    # Normalize data for consistent spacing
-    data_std = np.std(data, axis=1, keepdims=True)
-    data_normalized = data / (data_std + 1e-10)  # Avoid division by zero
+    # Normalize data (use min/max for each channel) for consistent spacing
+    data_normalized = (data - data.min(axis=1)[:, None]) / \
+                      (data.max(axis=1) - data.min(axis=1))[:, None] * 4
 
     # Create offset for each channel
     offsets = np.arange(n_channels) * spacing_factor

@@ -255,6 +255,7 @@ def preprocessing(dataset, data_folder: str):
         try:
             for key in data_dict:
                 data_dict[key] = processor.apply_whitening(data_dict[key])
+            for key in data_dict:
                 data_dict[key] = processor.normalize_signal(
                     data_dict[key], data_dict['interictal']
                 )
@@ -955,6 +956,7 @@ def analyze_seizure_propagation(
         'smooth_window': 50,
         'n_seconds': 80,
         'seizure_start': 10,
+        'seizure_plot_time': 10, # How many seconds to plot before seizrue starts
         'overlap': 0.8,
         'device': 'cuda:0'
     }
@@ -964,6 +966,8 @@ def analyze_seizure_propagation(
         default_params.update(params)
     params = default_params
 
+    prob_fs = int(1/(1 - params['overlap']))
+
     # Set up paths
     single_seizure_folder = os.path.join(data_folder, f"P{patient_no}")
     save_folder = os.path.join("result", f"P{patient_no}", f"Seizure{seizure_no}")
@@ -971,6 +975,12 @@ def analyze_seizure_propagation(
 
     # Get model name
     model_name = model.__class__.__name__
+
+    def load_matter_file(folder: str) -> Dict:
+        """Load Matter file for seizure"""
+        matter_file = os.path.join(folder, "matter.csv")
+        matter = pd.read_csv(matter_file)
+        return matter
 
     def load_seizure_data() -> Tuple[object, List[str], List[str]]:
         """Load seizure data and channel information"""
@@ -988,7 +998,22 @@ def analyze_seizure_propagation(
         if not hasattr(seizure_obj, 'ictal_transformed'):
             seizure_obj = extract_sEEG_features(seizure_obj, sampling_rate=seizure_obj.samplingRate)
 
+        # Load Matter file
+        if not hasattr(seizure_obj, 'matter'):
+            seizure_obj.matter = load_matter_file(single_seizure_folder)
+
         return seizure_obj, seizure_channels, seizure_onset_channels
+
+    def extract_grey_matter_channels(matter: pd.DataFrame, seizure_channels: List[str]) -> List[str]:
+        """Extract grey and 'A' matter channels from Matter file"""
+        # Get channels that are either grey matter ('G') or 'A' type
+        selected_matter = matter[matter['MatterType'].isin(['G', 'A'])]
+        selected_matter_channel_set = set(selected_matter['ElectrodeName'].values)
+
+        # Preserve original order from seizure_channels by filtering
+        selected_channels = [channel for channel in seizure_channels if channel in selected_matter_channel_set]
+
+        return selected_channels
 
     def process_data(seizure_obj) -> Tuple[np.ndarray, np.ndarray, float]:
         """Process raw seizure data"""
@@ -1078,7 +1103,7 @@ def analyze_seizure_propagation(
             )
 
         # Get section after seizure start
-        prob_section = prob_smoothed[params['seizure_start'] * 5:, :]
+        prob_section = prob_smoothed[params['seizure_start'] * prob_fs:, :]
 
         # Find first threshold crossing
         first_threshold = np.argmax(prob_section > params['threshold'], axis=0)
@@ -1124,32 +1149,60 @@ def analyze_seizure_propagation(
         # Smooth and rank channels
         prob_smoothed, sorted_indices = smooth_and_rank_channels(probabilities)
 
+        # Only start from seizure_plot_time seconds before the actual seizure
+        prob_smoothed = prob_smoothed[(params['seizure_start'] - params['seizure_plot_time']) * prob_fs:, :]
+
         # Map channel numbers to names
         channel_names = map_seizure_channels(sorted_indices[::-1],
                                              seizure_obj.gridmap)
 
+        grey_channel_names = extract_grey_matter_channels(seizure_obj.matter, channel_names)
+        grey_seizure_channels = extract_grey_matter_channels(seizure_obj.matter, seizure_channels)
+        grey_onset_channels = extract_grey_matter_channels(seizure_obj.matter, seizure_onset_channels)
+
         # Evaluate performance
-        performance = evaluate_performance(channel_names,
-                                           seizure_channels,
-                                           seizure_onset_channels)
+        performance = evaluate_performance(grey_channel_names,
+                                           grey_seizure_channels,
+                                           grey_onset_channels)
 
         # Create time axes for plotting
-        time_prob = np.arange(probabilities.shape[0]) * 0.2
+        time_prob = np.arange(prob_smoothed.shape[0]) * (1 - params['overlap'])
 
         # Save plots
         plot_time_limited_heatmap(
             data=prob_smoothed[:, sorted_indices].T,
             time_axis=time_prob,
             n_seconds=params['n_seconds'],
-            preictal_boundary=50,
+            preictal_boundary=params['seizure_plot_time'] * prob_fs,
             title=f"{model_name} Probability (Reranked)",
             cmap='hot',
             save_path=os.path.join(save_folder, f"{model_name}ProbabilityReranked.png"),
             flip_yaxis=False
         )
 
+        plot_time_limited_heatmap(
+            data=prob_smoothed.T,
+            time_axis=time_prob,
+            n_seconds=params['n_seconds'],
+            preictal_boundary=params['seizure_plot_time'] * prob_fs,
+            title=f"{model_name} Probability",
+            cmap='hot',
+            save_path=os.path.join(save_folder, f"{model_name}ProbabilityNoranked.png"),
+            flip_yaxis=True
+        )
+
+        raw_data_ictal = seizure_obj.ictal
+        raw_data_preicatal = seizure_obj.interictal
+
+        # Reshape the data
+        raw_data_ictal = raw_data_ictal.reshape(-1, raw_data_ictal.shape[2])[:(params['n_seconds'] - params['seizure_plot_time']) * seizure_obj.samplingRate]
+        raw_data_preicatal = raw_data_preicatal.reshape(-1, raw_data_preicatal.shape[2])[-params['seizure_plot_time'] * seizure_obj.samplingRate:]
+
+        # Combine the data
+        sub_data = np.concatenate((raw_data_preicatal, raw_data_ictal), axis=0)
+
         # Save raw EEG plot
-        sub_data = total_data[:int(fs * params['n_seconds']), :]
+        # sub_data = total_data[:int(fs * params['n_seconds']), :]
         fig = plot_eeg_style(sub_data.T, fs, spacing_factor=2, color='black', linewidth=0.5)
         fig.savefig(os.path.join(save_folder, "Raw_EEG.png"), dpi=300, bbox_inches='tight')
         plt.close()
