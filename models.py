@@ -450,6 +450,236 @@ class ResNet(nn.Module):
         return output
 
 
+class EnhancedResNet(nn.Module):
+    def __init__(
+            self,
+            input_dim=11,  # Input feature dimension
+            output_dim=2,  # Output dimension (usually 2: non-seizure/seizure)
+            base_filters=32,  # Base filter count
+            n_blocks=3,  # Number of residual blocks
+            kernel_size=16,  # Convolution kernel size
+            dropout=0.2,  # Dropout rate
+            lr=0.001,  # Learning rate
+            weight_decay=1e-5,  # Weight decay
+            norm_type='batch',  # Normalization type
+            gamma=0.5,  # Anatomical constraint loss weight
+            delta=0.5  # Temporal consistency loss weight
+    ):
+        """
+        Enhanced ResNet model with support for anatomical constraints and seizure channel masks
+        """
+        super().__init__()
+
+        self.input_dim = input_dim
+        self.output_dim = output_dim
+        self.device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
+
+        self.norm_layer = nn.BatchNorm1d if norm_type == 'batch' else nn.LayerNorm
+
+        # Store loss weights
+        self.gamma = gamma
+        self.delta = delta
+
+        # Initial feature embedding layer
+        self.feature_embedding = nn.Linear(input_dim, base_filters)
+
+        # Initial causal convolution
+        self.initial = nn.Sequential(
+            nn.Conv1d(base_filters, base_filters, kernel_size),
+            self.norm_layer(base_filters),
+            nn.ReLU(),
+            nn.Dropout(dropout)
+        )
+
+        # Stack of dilated convolution blocks
+        self.blocks = nn.ModuleList()
+        for i in range(n_blocks):
+            dilation = 2 ** (i % 8)
+            self.blocks.append(nn.ModuleDict({
+                'dilated_conv': nn.Conv1d(
+                    base_filters,
+                    base_filters * 2,
+                    kernel_size,
+                    dilation=dilation,
+                ),
+                'norm': self.norm_layer(base_filters),
+                'res_conv': nn.Conv1d(base_filters, base_filters, 1),
+                'dropout': nn.Dropout(dropout)
+            }))
+
+        self.global_pool = nn.AdaptiveAvgPool1d(1)
+
+        # Create branches for different tasks
+        hidden_size = base_filters
+
+        # Main classification head - matches other models' output interface
+        self.fc = nn.Linear(hidden_size, output_dim)
+
+        # Set standard loss function and optimizer for compatibility
+        self.criteria = nn.CrossEntropyLoss()
+        self.optimizer = optim.Adam(self.parameters(), lr=lr, weight_decay=weight_decay)
+
+        # Masks and weights
+        self.seizure_mask = None
+        self.grey_matter_values = None
+
+        # Move to appropriate device
+        self.to(self.device)
+
+    def set_seizure_mask(self, mask):
+        """Set seizure channel mask"""
+        self.seizure_mask = mask
+
+    def set_grey_matter_values(self, values):
+        """Set grey matter values"""
+        self.grey_matter_values = values
+
+    def forward(self, x):
+        """
+        Forward pass
+
+        Args:
+            x: Input data (batch_size, channels, time_steps)
+
+        Returns:
+            Model output (batch_size, output_dim)
+        """
+        batch_size, n_features, time_steps = x.shape
+
+        # Feature embedding
+        x = x.permute(0, 2, 1).reshape(batch_size * time_steps, n_features)
+        x = self.feature_embedding(x)
+        x = x.reshape(batch_size, time_steps, -1).permute(0, 2, 1)
+
+        # Apply causal padding for initial conv
+        x = F.pad(x, (1, 0))
+        x = self.initial(x)
+
+        # Process blocks and accumulate skip connections
+        skip_sum = 0
+        for block in self.blocks:
+            residual = x
+
+            # Causal padding
+            padding = block['dilated_conv'].dilation[0] * (block['dilated_conv'].kernel_size[0] - 1)
+            x = F.pad(x, (padding, 0))
+
+            # Dilated conv and gating
+            x = block['dilated_conv'](x)
+            filter_x, gate_x = torch.chunk(x, 2, dim=1)
+            x = torch.tanh(filter_x) * torch.sigmoid(gate_x)
+
+            # Residual connection
+            x = block['res_conv'](x)
+            x = block['norm'](x)
+            x = block['dropout'](x)
+            x = x + residual
+
+            # Add to skip connections sum
+            skip_sum = skip_sum + x
+
+        # Global pooling to extract features
+        features = self.global_pool(skip_sum).squeeze(-1)
+
+        # Main output
+        output = self.fc(features)
+
+        return output
+
+    def anatomical_constraint_loss(self, outputs, input_channel_indices):
+        """
+        Calculate anatomical constraint loss using grey matter values
+
+        Args:
+            outputs: Model outputs
+            targets: Optional target labels
+        """
+        if self.grey_matter_values is None:
+            return 0.0
+
+        # Get seizure probabilities
+        seizure_probs = F.softmax(outputs, dim=1)[:, 1]
+
+        grey_matter_values = self.grey_matter_values
+
+        # Calculate weighted loss based on grey matter values
+        # Higher penalty for white matter (low grey_matter_values)
+        # Lower penalty for grey matter (high grey_matter_values)
+        white_matter_weight = 1.0 - grey_matter_values  # Invert values: 1.0 for white, 0.0 for grey
+
+        # Apply threshold and calculate weighted loss
+        threshold = 0.3  # Seizure probability threshold TODO: make this a hyperparameter
+        weighted_loss = torch.clamp(seizure_probs * white_matter_weight - threshold, min=0)
+
+        # Return the mean weighted loss
+        return self.gamma * torch.mean(weighted_loss)
+
+    def temporal_loss(self, outputs, input_channel_indices, input_time_indices):
+        '''
+        Enforce temporal consistency within the same channel
+        '''
+        seizure_probs = F.softmax(outputs, dim=1)[:, 1]
+
+        loss = 0.0
+        count = 0
+
+        # Group by channel
+        for ch in torch.unique(input_channel_indices):
+            ch_mask = input_channel_indices == ch
+            ch_times = input_time_indices[ch_mask]
+            ch_probs = seizure_probs[ch_mask]
+
+            # Sort by time
+            sorted_times, sort_idx = torch.sort(ch_times)
+            ch_probs_sorted = ch_probs[sort_idx]
+
+            # Penalize if later prob < earlier prob
+            diff = ch_probs_sorted[:-1] - ch_probs_sorted[1:]
+            penalty = torch.clamp(diff, min=0)
+            loss += torch.sum(penalty)
+            count += len(penalty)
+
+        if count == 0:
+            return 0.0
+        return self.delta * loss / count
+
+    def custom_loss(self, outputs, targets, input_channel_indices, input_time_indices):
+        """
+        Combined loss function
+
+        Args:
+            outputs: Model outputs
+            targets: Target labels
+
+        Returns:
+            Total loss value
+        """
+        # Standard classification loss
+        classification_loss = self.criteria(outputs, targets)
+
+        # Anatomical constraint loss
+        anatomical_loss = self.anatomical_constraint_loss(outputs, input_channel_indices)
+
+        # Seizure channel loss
+        temporal_loss = self.temporal_loss(outputs, input_channel_indices, input_time_indices)
+
+        # Combined loss
+        total_loss = classification_loss + anatomical_loss + temporal_loss
+
+        return total_loss
+
+    def random_init(self):
+        """Randomly initialize model weights"""
+        for name, param in self.named_parameters():
+            if 'weight' in name:
+                if 'conv' in name:
+                    nn.init.kaiming_normal_(param)
+                else:
+                    nn.init.xavier_normal_(param)
+            elif 'bias' in name:
+                nn.init.zeros_(param)
+
+
 class EarlyStopping:
     """Early stopping handler"""
 
@@ -725,6 +955,13 @@ def hyperparameter_search_for_model(
             except:
                 pass  # Silently fail if dropout can't be set
 
+        # Set gamma and delta for EnhancedResNet if they're in the hyperparameters
+        if isinstance(model, EnhancedResNet):
+            if 'gamma' in hp:
+                model.gamma = hp['gamma']
+            if 'delta' in hp:
+                model.delta = hp['delta']
+
         # Mini training with early stopping for quick evaluation
         mini_epochs = min(15, n_trials)  # Reduced number of epochs for quick evaluation
 
@@ -733,19 +970,35 @@ def hyperparameter_search_for_model(
             temp_dir = os.path.join(model_folder, f"optuna_trial_{trial.number}")
             os.makedirs(temp_dir, exist_ok=True)
 
-            # Train with limited epochs for hyperparameter search
-            _, val_losses, val_accuracies = train_using_optimizer(
-                model=model,
-                trainloader=train_loader,
-                valloader=val_loader,
-                save_location=temp_dir,
-                epochs=mini_epochs,
-                device=device,
-                patience=hp.get('patience', 5),
-                scheduler_patience=hp.get('scheduler_patience', 3),
-                gradient_clip=hp.get('gradient_clip', 1.0),
-                checkpoint_freq=1  # Evaluate at every epoch for optuna
-            )
+            # Choose the appropriate training function based on model type
+            if isinstance(model, EnhancedResNet):
+                # Train with limited epochs for hyperparameter search
+                _, val_losses, val_accuracies = train_using_optimizer_with_masks(
+                    model=model,
+                    trainloader=train_loader,
+                    valloader=val_loader,
+                    save_location=temp_dir,
+                    epochs=mini_epochs,
+                    device=device,
+                    patience=hp.get('patience', 5),
+                    scheduler_patience=hp.get('scheduler_patience', 3),
+                    gradient_clip=hp.get('gradient_clip', 1.0),
+                    checkpoint_freq=1  # Evaluate at every epoch for optuna
+                )
+            else:
+                # Use standard training for other models
+                _, val_losses, val_accuracies = train_using_optimizer(
+                    model=model,
+                    trainloader=train_loader,
+                    valloader=val_loader,
+                    save_location=temp_dir,
+                    epochs=mini_epochs,
+                    device=device,
+                    patience=hp.get('patience', 5),
+                    scheduler_patience=hp.get('scheduler_patience', 3),
+                    gradient_clip=hp.get('gradient_clip', 1.0),
+                    checkpoint_freq=1  # Evaluate at every epoch for optuna
+                )
 
             # Use the best validation accuracy as the objective
             trial.set_user_attr('val_losses', val_losses)
@@ -795,7 +1048,6 @@ def hyperparameter_search_for_model(
     print(f"  Params: {trial.params}")
 
     return trial.params
-
 
 def output_to_probability(model, x, device='cuda:0'):
     '''
@@ -936,3 +1188,212 @@ def evaluate_model(
         logger.error(f"Evaluation failed: {str(e)}")
         raise
 
+
+def train_using_optimizer_with_masks(
+        model,
+        trainloader,
+        valloader,
+        save_location=None,
+        epochs=200,
+        device='cuda:0',
+        patience=7,
+        scheduler_patience=5,
+        checkpoint_freq=20,
+        gradient_clip=None
+):
+    """
+    Enhanced training function with mask support
+
+    Args:
+        model: Neural network model
+        trainloader: Training data loader with mask support
+        valloader: Validation data loader with mask support
+        save_location: Directory to save model checkpoints
+        epochs: Number of training epochs
+        device: Device to train on
+        patience: Early stopping patience
+        scheduler_patience: Learning rate scheduler patience
+        checkpoint_freq: Frequency of model checkpointing
+        gradient_clip: Maximum gradient norm for gradient clipping
+
+    Returns:
+        train_losses: List of training losses
+        val_losses: List of validation losses
+        val_accuracies: List of validation accuracies
+    """
+    # Setup device
+    if device.startswith('cuda') and not torch.cuda.is_available():
+        print("CUDA not available, falling back to CPU")
+        device = 'cpu'
+    device = torch.device(device)
+    model = model.to(device)
+
+    # Initialize tracking variables
+    train_losses = []
+    val_losses = []
+    val_accuracies = []
+    best_val_loss = float('inf')
+    best_model_state = None
+
+    # Initialize early stopping and learning rate scheduler
+    early_stopping = EarlyStopping(patience=patience)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        model.optimizer, mode='min', patience=scheduler_patience, verbose=True
+    )
+
+    # Training loop
+    for epoch in range(epochs):
+        # Training phase
+        model.train()
+        running_loss = 0.0
+
+        # Progress bar for training
+        pbar = tqdm(trainloader, desc=f'Epoch {epoch + 1}/{epochs}')
+        for i, batch in enumerate(pbar):
+            # Move data to device
+            data = batch['data'].float().to(device)
+            labels = batch['label'].long().to(device)
+
+            # Set masks if available
+            if isinstance(model, EnhancedResNet):
+                model.set_grey_matter_values(batch['grey_matter_values'].float().to(device))
+                model.set_seizure_mask(batch['seizure_mask'].bool().to(device))
+                input_channel_indices = batch['channel_idx'].long().to(device)
+                input_time_indices = batch['time_idx'].long().to(device)
+
+            # Forward pass
+            outputs = model(data)
+
+            # Compute loss
+            if isinstance(model, EnhancedResNet) and hasattr(model, 'custom_loss'):
+                loss = model.custom_loss(outputs, labels, input_channel_indices, input_time_indices)
+            else:
+                loss = model.criteria(outputs, labels)
+
+            # Backward pass and gradient clipping
+            model.optimizer.zero_grad()
+            loss.backward()
+            if gradient_clip:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), gradient_clip)
+
+            # Optimizer step
+            model.optimizer.step()
+
+            # Update metrics
+            running_loss += loss.item()
+
+            # Update progress bar
+            pbar.set_postfix({
+                'loss': f'{loss.item():.4f}',
+                'avg_loss': f'{running_loss / (i + 1):.4f}'
+            })
+
+        # Calculate epoch metrics
+        epoch_loss = running_loss / len(trainloader)
+        train_losses.append(epoch_loss)
+
+        # Validation phase
+        val_loss, val_accuracy = evaluate_model_with_masks(model, valloader, device)
+        val_losses.append(val_loss)
+        val_accuracies.append(val_accuracy)
+
+        # Update learning rate scheduler
+        scheduler.step(val_loss)
+
+        # Save best model
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            best_model_state = model.state_dict().copy()
+
+        # Checkpointing
+        if save_location and (epoch + 1) % checkpoint_freq == 0:
+            model_name = model.__class__.__name__
+            checkpoint = {
+                'epoch': epoch + 1,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': model.optimizer.state_dict(),
+                'train_loss': epoch_loss,
+                'val_loss': val_loss,
+                'val_accuracy': val_accuracy
+            }
+            save_file = os.path.join(save_location, f'{model_name}_epoch{epoch + 1}.pth')
+            torch.save(checkpoint, save_file)
+
+        # Print metrics
+        print(f'Epoch [{epoch + 1}/{epochs}]')
+        print(f'Training Loss: {epoch_loss:.4f}')
+        print(f'Validation Loss: {val_loss:.4f}')
+        print(f'Validation Accuracy: {val_accuracy:.4f}')
+
+        # Early stopping check
+        if early_stopping(val_loss):
+            print("Early stopping triggered")
+            break
+
+    # Save best model
+    if save_location and best_model_state:
+        model_name = model.__class__.__name__
+        best_model_path = os.path.join(save_location, f'{model_name}_best.pth')
+        torch.save({
+            'model_state_dict': best_model_state,
+            'val_loss': best_val_loss
+        }, best_model_path)
+
+    # Clear GPU memory
+    torch.cuda.empty_cache()
+
+    return train_losses, val_losses, val_accuracies
+
+
+def evaluate_model_with_masks(model, dataloader, device):
+    """
+    Evaluate model with mask support
+
+    Args:
+        model: Neural network model
+        dataloader: Data loader with mask support
+        device: Device to evaluate on
+
+    Returns:
+        avg_loss: Average loss
+        avg_accuracy: Average accuracy
+    """
+    model.eval()
+    total_loss = 0.0
+    correct = 0
+    total = 0
+
+    with torch.no_grad():
+        for batch in dataloader:
+            # Move data to device
+            data = batch['data'].float().to(device)
+            labels = batch['label'].long().to(device)
+
+            # Set masks if available
+            if isinstance(model, EnhancedResNet):
+                model.set_grey_matter_values(batch['grey_matter_values'].float().to(device))
+                model.set_seizure_mask(batch['seizure_mask'].bool().to(device))
+                input_channel_indices = batch['channel_idx'].long().to(device)
+                input_time_indices = batch['time_idx'].long().to(device)
+
+            # Forward pass
+            outputs = model(data)
+
+            # Compute loss
+            if isinstance(model, EnhancedResNet) and hasattr(model, 'custom_loss'):
+                loss = model.custom_loss(outputs, labels, input_channel_indices, input_time_indices)
+            else:
+                loss = model.criteria(outputs, labels)
+
+            total_loss += loss.item() * data.size(0)
+
+            # Compute accuracy
+            _, predicted = torch.max(outputs.data, 1)
+            total += labels.size(0)
+            correct += (predicted == labels).sum().item()
+
+    # Calculate average metrics
+    avg_loss = total_loss / total
+    avg_accuracy = correct / total
+
+    return avg_loss, avg_accuracy

@@ -204,30 +204,17 @@ class CustomDataset(Dataset):
         return X_sample, y_label
 
 
-def load_seizure(path):
+def load_seizure(path, marking_file='data/Seizure_Onset_Type_ML_USC.xlsx'):
     """
-    Load the seizure data from the specified path and handle both marked and unmarked channels.
+    Load the seizure data from the specified path and store seizure channel and grey matter information.
 
-    :param path: Path to the seizure data
-    :return: Combined seizure data
+    Args:
+        path: Path to the seizure data
+        marking_file: Path to the seizure marking file
+
+    Returns:
+        Combined seizure data with seizure_channels and grey_matter_mask attributes
     """
-
-    def load_seizure_data(seizure_no, patient_no, gridmap,
-                          marking_file='data/Seizure_Onset_Type_ML_USC.xlsx'):
-        """Load seizure data and channel information"""
-        try:
-            # Load seizure marking data
-            seizure_marking = pd.read_excel(marking_file)
-
-            # Find seizure-related channels
-            seizure_channels, _ = find_seizure_related_channels(
-                seizure_marking, seizure_no, patient_no
-            )
-            seizure_channels = map_seizure_channels(seizure_channels, gridmap, mode='name_to_num')
-            return seizure_channels
-        except:
-            return None
-
     seizure_data_combined = EDFData(None, None, None)
     raw_data_list = []  # Store all raw data for later processing
 
@@ -236,22 +223,87 @@ def load_seizure(path):
 
     for cleaned_file in cleaned_files:
         raw = pickle.load(open(os.path.join(path, cleaned_file), "rb"))
-        seizure_No = int(raw.seizureNumber.split("SZ")[-1]) if raw.seizureNumber.split("SZ")[-1].isdigit() else 1
-        seizure_channels = load_seizure_data(seizure_No, raw.patNo, raw.gridmap)
+        # Extract seizure number from filename
+        # Pattern: "seizure_SZX_CLEANED.pkl" or similar
+        import re
+        match = re.search(r'seizure_SZ(\d+)_', cleaned_file)
+        if match:
+            seizure_No = int(match.group(1))
+            raw.seizureNumber = f"SZ{seizure_No}"
+        else:
+            print(f"Warning: Could not extract seizure number from filename: {cleaned_file}")
+            # Use default from the file if available, or set to unknown
+            seizure_No = 1
+            if hasattr(raw, 'seizureNumber') and raw.seizureNumber and isinstance(raw.seizureNumber, str):
+                if raw.seizureNumber.startswith("SZ"):
+                    try:
+                        seizure_No = int(raw.seizureNumber[2:])
+                    except ValueError:
+                        pass
+            raw.seizureNumber = f"SZ{seizure_No}"
 
-        # If no channels are marked, use all available channels
-        if seizure_channels is None or len(seizure_channels) == 0:
-            print(f"Warning: No marked channels for seizure {seizure_No} of patient {raw.patNo}. Using all channels.")
-            seizure_channels = list(range(raw.ictal.shape[1]))  # Use all available channels
+        # Load seizure channel information
+        try:
+            # Load seizure marking data
+            seizure_marking = pd.read_excel(marking_file)
 
-        raw_data_list.append((raw, seizure_channels))
+            # Find seizure-related channels
+            seizure_channels, _ = find_seizure_related_channels(
+                seizure_marking, seizure_No, raw.patNo
+            )
+            # Store channel indices directly
+            raw.seizure_channels = map_seizure_channels(seizure_channels, raw.gridmap, mode='name_to_num')
+        except Exception as e:
+            print(f"Warning: Couldn't get seizure channels for seizure {seizure_No}: {str(e)}")
+            raw.seizure_channels = []
+
+        # Load grey matter information (if available)
+        try:
+            # Load matter information from matter.csv if exists
+            matter_file = os.path.join(path, "matter.csv")
+            if os.path.exists(matter_file):
+                matter = pd.read_csv(matter_file)
+
+                # Get all electrode names
+                all_channels = []
+                for i in range(raw.ictal.shape[1]):
+                    # Map channel number to name
+                    channel_name = map_seizure_channels([i], raw.gridmap)[0]
+                    all_channels.append(channel_name)
+
+                # Create grey matter mask with float values instead of boolean
+                # 1.0 = gray matter, 0.0 = white matter, 0.5 = ambiguous
+                grey_matter_values = np.zeros(raw.ictal.shape[1], dtype=float)
+
+                # For each channel, assign a value based on matter type
+                for i, channel_name in enumerate(all_channels):
+                    if channel_name in matter['ElectrodeName'].values:
+                        # Get matter type
+                        matter_type = matter[matter['ElectrodeName'] == channel_name]['MatterType'].values[0]
+                        if matter_type == 'G':  # Grey matter
+                            grey_matter_values[i] = 1.0
+                        elif matter_type == 'W':  # White matter
+                            grey_matter_values[i] = 0.0
+                        elif matter_type == 'A':  # Ambiguous
+                            grey_matter_values[i] = 0.5  # Intermediate value
+
+                raw.grey_matter_values = grey_matter_values
+
+                # You can also keep a boolean mask for compatibility
+                grey_matter_mask = grey_matter_values > 0.0  # Treat both G and A as grey matter
+                raw.grey_matter_mask = grey_matter_mask
+            else:
+                raw.grey_matter_values = None
+                raw.grey_matter_mask = None
+
+        except Exception as e:
+            print(f"Warning: Couldn't get grey matter info for seizure {seizure_No}: {str(e)}")
+            raw.grey_matter_mask = None
+
+        raw_data_list.append(raw)
 
     # Process each seizure
-    for i, (raw, seizure_channels) in enumerate(raw_data_list):
-        # Keep only the relevant channels for marked seizures
-        if seizure_channels is not None:
-            raw.ictal = raw.ictal[:, seizure_channels]
-
+    for i, raw in enumerate(raw_data_list):
         # Split the data into segments
         raw.interictal = split_data(raw.interictal, raw.samplingRate)
         raw.ictal = split_data(raw.ictal, raw.samplingRate)
@@ -260,8 +312,35 @@ def load_seizure(path):
         # Initialize combined data with the first seizure
         if seizure_data_combined.patNo is None:
             seizure_data_combined = raw
+            # delete the annotation, annotation_onset, and channel_names, and change the documentation
+            del seizure_data_combined.annotations
+            del seizure_data_combined.annotations_onset
+            del seizure_data_combined.channel_names
+            seizure_data_combined.documentation = ("Combined data from all seizures\n"
+                                                   "ictal: Data during seizure\n"
+                                                   "grey_matter_values: Grey matter values for each channel\n"
+                                                   "grey_matter_mask: Grey matter mask for each channel\n"
+                                                   "seizure_specific_channels: Dictionary mapping seizure numbers to channel indices\n"
+                                                   "segment_to_seizure: Dictionary mapping segment indices to seizure numbers\n"
+                                                   "seizure_segment_counts: Dictionary mapping seizure numbers to segment counts\n"
+                                                   "patNo: Patient number\n")
+
+            # Create dictionary to store seizure-specific channel information
+            seizure_data_combined.seizure_specific_channels = {}
+            seizure_data_combined.seizure_specific_channels[raw.seizureNumber] = raw.seizure_channels
+
+            # Keep track of which segments belong to which seizure
+            seizure_data_combined.segment_to_seizure = {}
+            for seg_idx in range(len(raw.ictal)):
+                seizure_data_combined.segment_to_seizure[seg_idx] = raw.seizureNumber
+
+            # Track the number of segments from each seizure
+            seizure_data_combined.seizure_segment_counts = {raw.seizureNumber: len(raw.ictal)}
         else:
-            # Check if dimensions match
+            # Keep track of current segment count to use as offset for new segments
+            prev_segments_count = len(seizure_data_combined.ictal)
+
+            # Check if dimensions match and adjust if needed
             if raw.ictal.shape[2] != seizure_data_combined.ictal.shape[2]:
                 print(f"Warning: Channel mismatch in seizure {raw.seizureNumber}. Adjusting dimensions...")
                 # Pad with zeros if necessary
@@ -288,8 +367,25 @@ def load_seizure(path):
             seizure_data_combined.postictal = np.vstack((seizure_data_combined.postictal,
                                                          raw.postictal))
 
+            # Store seizure-specific channel information
+            seizure_data_combined.seizure_specific_channels[raw.seizureNumber] = raw.seizure_channels
+
+            # Keep track of which segments belong to which seizure
+            for seg_idx in range(len(raw.ictal)):
+                global_seg_idx = prev_segments_count + seg_idx
+                seizure_data_combined.segment_to_seizure[global_seg_idx] = raw.seizureNumber
+
+            # Track the segment counts
+            seizure_data_combined.seizure_segment_counts[raw.seizureNumber] = len(raw.ictal)
+
     seizure_data_combined.seizureNumber = 'All'
+
+    # Save the combined data
+    with open(os.path.join(path, "seizure_All_combined.pkl"), "wb") as f:
+        pickle.dump(seizure_data_combined, f)
+
     return seizure_data_combined
+
 
 def load_seizure_across_patients(data_folder):
 
@@ -308,6 +404,7 @@ def load_seizure_across_patients(data_folder):
             seizure_data_combined.append(seizure_single)
 
     return seizure_data_combined
+
 
 def load_single_seizure(path, seizure_number):
     """
@@ -330,17 +427,74 @@ def load_single_seizure(path, seizure_number):
         raw.ictal = split_data(raw.ictal, raw.samplingRate)
         raw.postictal = split_data(raw.postictal, raw.samplingRate)
 
+    # Load seizure channel information
+    try:
+        # Load seizure marking data
+        seizure_marking = pd.read_excel('data/Seizure_Onset_Type_ML_USC.xlsx')
+
+        # Find seizure-related channels
+        seizure_channels, _ = find_seizure_related_channels(
+            seizure_marking, seizure_number, raw.patNo
+        )
+        # Store channel indices directly
+        raw.seizure_channels = map_seizure_channels(seizure_channels, raw.gridmap, mode='name_to_num')
+    except Exception as e:
+        print(f"Warning: Couldn't get seizure channels for seizure {seizure_number}: {str(e)}")
+        raw.seizure_channels = []
+
+    # Load grey matter information (if available)
+    try:
+        # Load matter information from matter.csv if exists
+        matter_file = os.path.join(path, "matter.csv")
+        if os.path.exists(matter_file):
+            matter = pd.read_csv(matter_file)
+
+            # Get all electrode names
+            all_channels = []
+            for i in range(raw.ictal.shape[1]):
+                # Map channel number to name
+                channel_name = map_seizure_channels([i], raw.gridmap)[0]
+                all_channels.append(channel_name)
+
+            # Create grey matter mask with float values instead of boolean
+            # 1.0 = gray matter, 0.0 = white matter, 0.5 = ambiguous
+            grey_matter_values = np.zeros(raw.ictal.shape[1], dtype=float)
+
+            # For each channel, assign a value based on matter type
+            for i, channel_name in enumerate(all_channels):
+                if channel_name in matter['ElectrodeName'].values:
+                    # Get matter type
+                    matter_type = matter[matter['ElectrodeName'] == channel_name]['MatterType'].values[0]
+                    if matter_type == 'G':  # Grey matter
+                        grey_matter_values[i] = 1.0
+                    elif matter_type == 'W':  # White matter
+                        grey_matter_values[i] = 0.0
+                    elif matter_type == 'A':  # Ambiguous
+                        grey_matter_values[i] = 0.5  # Intermediate value
+
+            raw.grey_matter_values = grey_matter_values
+
+            # You can also keep a boolean mask for compatibility
+            grey_matter_mask = grey_matter_values > 0.0  # Treat both G and A as grey matter
+            raw.grey_matter_mask = grey_matter_mask
+        else:
+            raw.grey_matter_values = None
+            raw.grey_matter_mask = None
+
+    except Exception as e:
+        print(f"Warning: Couldn't get grey matter info for seizure {seizure_number}: {str(e)}")
+        raw.grey_matter_mask = None
+
     return raw
 
 
 def create_dataset(seizure, train_percentage=0.8, batch_size=512, min_activity_threshold=1e-6,
                    input_type='raw', window_size=20, sliding_step=5):
     """
-    Create training and validation datasets, handling zero-padded channels after flattening.
-    Supports raw data, transformed features, or a combined approach.
+    Create training and validation datasets with proper masking for all input types.
 
     Args:
-        seizure: Seizure data object containing ictal, interictal, and postictal data
+        seizure: Seizure data object containing ictal, interictal and postictal data
         train_percentage: Percentage of data to use for training
         batch_size: Size of batches for training
         min_activity_threshold: Minimum activity threshold to consider a sample non-empty
@@ -353,261 +507,179 @@ def create_dataset(seizure, train_percentage=0.8, batch_size=512, min_activity_t
         val_loader: DataLoader for validation data
     """
 
-    # Define custom dataset class if not already defined
+    # Define custom dataset class
     class CustomDataset(Dataset):
-        def __init__(self, data, labels):
-            self.data = data
-            self.labels = labels
+        def __init__(self, data, labels, channel_idx, time_idx, seizure_mask=None, grey_matter_values=None):
+            self.data = torch.tensor(data, dtype=torch.float32)
+            self.labels = torch.tensor(labels, dtype=torch.long)
+            self.channel_idx = torch.tensor(channel_idx, dtype=torch.long)
+            self.time_idx = torch.tensor(time_idx, dtype=torch.long)
+            self.seizure_mask = torch.tensor(seizure_mask, dtype=torch.bool) if seizure_mask is not None else None
+            self.grey_matter_values = torch.tensor(grey_matter_values, dtype=torch.float32) if grey_matter_values is not None else None
 
         def __len__(self):
             return len(self.data)
 
         def __getitem__(self, idx):
-            return self.data[idx], self.labels[idx]
+            item = {
+                'data': self.data[idx],
+                'label': self.labels[idx],
+                'channel_idx': self.channel_idx[idx],
+                'time_idx': self.time_idx[idx]
+            }
+            if self.seizure_mask is not None:
+                item['seizure_mask'] = self.seizure_mask[idx]
+            if self.grey_matter_values is not None:
+                item['grey_matter_values'] = self.grey_matter_values[idx]
+            return item
+
+    # Check seizure-specific info
+    has_seizure_specific = (
+            hasattr(seizure, 'seizure_specific_channels') and
+            bool(seizure.seizure_specific_channels) and
+            hasattr(seizure, 'segment_to_seizure')
+    )
+    has_grey_matter = hasattr(seizure, 'grey_matter_values') and seizure.grey_matter_values is not None
 
     if input_type == 'raw':
-        # Original raw data approach
-        seizure_data = seizure.ictal
-        nonseizure_data = seizure.interictal
-        nonseizure_data_postictal = seizure.postictal
+        seizure_data = seizure.ictal.transpose(0, 2, 1)
+        nonseizure_data = np.concatenate((seizure.interictal, seizure.postictal), axis=0).transpose(0, 2, 1)
 
-        # Combine the nonseizure and postictal data
-        nonseizure_data = np.concatenate((nonseizure_data, nonseizure_data_postictal), axis=0)
+        data_list = []
+        label_list = []
+        channel_idx_list = []
+        time_idx_list = []
+        seizure_mask_list = []
+        grey_matter_list = []
 
-        # Transpose to get the correct shape for the model
-        seizure_data_flat = seizure_data.transpose(0, 2, 1)
-        nonseizure_data_flat = nonseizure_data.transpose(0, 2, 1)
+        # Process seizure segments
+        for seg_idx, segment in enumerate(seizure_data):
+            seizure_num = seizure.segment_to_seizure.get(seg_idx, 'All') if has_seizure_specific else 'All'
+            seizure_channels = seizure.seizure_specific_channels.get(seizure_num, []) if has_seizure_specific else []
+            for ch_idx, signal in enumerate(segment):
+                if np.max(np.abs(signal)) > min_activity_threshold:
+                    data_list.append(signal)
+                    label_list.append(1)
+                    channel_idx_list.append(ch_idx)
+                    time_idx_list.append(seg_idx)
+                    seizure_mask_list.append(1 if ch_idx in seizure_channels else 0)
+                    if has_grey_matter:
+                        grey_matter_list.append(seizure.grey_matter_values[ch_idx])
 
-        # Flatten the dataset from [Sample, Channel, Time] to [Sample * Channel, Time, 1]
-        seizure_data_flat = np.concatenate([seizure_data_flat[:, i, :] for i in range(seizure_data_flat.shape[1])],
-                                           axis=0)
-        nonseizure_data_flat = np.concatenate(
-            [nonseizure_data_flat[:, i, :] for i in range(nonseizure_data_flat.shape[1])], axis=0)
-
-        # Remove flattened samples that are all zeros (from padding)
-        sample_activity = np.sum(np.abs(seizure_data_flat), axis=1)  # Sum across time dimension only
-        active_samples = sample_activity.squeeze() > min_activity_threshold
-
-        if np.sum(active_samples) == 0:
-            print("Warning: No active samples found in seizure data. Check your data or threshold.")
-        else:
-            n_removed = len(active_samples) - np.sum(active_samples)
-            print(f"Removed {n_removed} zero-padded samples out of {len(active_samples)} total samples")
-            seizure_data_flat = seizure_data_flat[active_samples]
-
-        # Create the labels
-        seizure_labels = np.ones(len(seizure_data_flat))
-        nonseizure_labels = np.zeros(len(nonseizure_data_flat))
-
-        # Combine the dataset and labels
-        data = np.concatenate((seizure_data_flat, nonseizure_data_flat), axis=0)
-        data = np.expand_dims(data, axis=2)  # Add channel dimension
-        data = np.transpose(data, (0, 2, 1))  # Transpose to [Sample, Channel, Time]
-        labels = np.concatenate((seizure_labels, nonseizure_labels), axis=0)
+        # Process non-seizure segments
+        offset_seg_idx = seizure_data.shape[0]  # Nonseizure segments are after ictal
+        for seg_idx, segment in enumerate(nonseizure_data):
+            for ch_idx, signal in enumerate(segment):
+                if np.max(np.abs(signal)) > min_activity_threshold:
+                    data_list.append(signal)
+                    label_list.append(0)
+                    channel_idx_list.append(ch_idx)
+                    time_idx_list.append(offset_seg_idx + seg_idx)
+                    seizure_mask_list.append(0)
+                    if has_grey_matter:
+                        grey_matter_list.append(seizure.grey_matter_values[ch_idx])
 
     elif input_type == 'transformed':
-        # Process transformed data
-        # Check if the transformed data exists
-        if not hasattr(seizure, 'ictal_transformed') or not hasattr(seizure, 'interictal_transformed'):
-            raise ValueError("Transformed data not found. Run extract_features_store_in_object first.")
+        seizure_data = seizure.ictal_transformed
+        nonseizure_data = np.concatenate((seizure.interictal_transformed, seizure.postictal_transformed), axis=0)
 
-        # Prepare transformed data for LSTM/CNN input
-        X_sequences = []
-        y_labels = []
+        data_list = []
+        label_list = []
+        channel_idx_list = []
+        time_idx_list = []
+        seizure_mask_list = []
+        grey_matter_list = []
 
-        # Process ictal data (seizure)
-        ictal_data = seizure.ictal_transformed
-        n_segments, n_channels, n_windows, n_features = ictal_data.shape
+        # Process seizure segments
+        for seg_idx, segment in enumerate(seizure_data):
+            seizure_num = seizure.segment_to_seizure.get(seg_idx, 'All') if has_seizure_specific else 'All'
+            seizure_channels = seizure.seizure_specific_channels.get(seizure_num, []) if has_seizure_specific else []
 
-        if n_windows < window_size:
-            print(f"Warning: ictal data has only {n_windows} windows, but window_size is {window_size}.")
-        else:
-            for segment_idx in range(n_segments):
-                for channel_idx in range(n_channels):
-                    # Get feature time series for this segment and channel
-                    feature_array = ictal_data[segment_idx, channel_idx]
+            for ch_idx, signal in enumerate(segment):
+                if np.max(np.abs(signal)) > min_activity_threshold:
+                    signal = signal.transpose(1, 0)  # (features, time_steps)
+                    data_list.append(signal)
+                    label_list.append(1)
+                    channel_idx_list.append(ch_idx)
+                    time_idx_list.append(seg_idx)
+                    grey_matter_list.append(seizure.grey_matter_values[ch_idx])
 
-                    # Add to lists
-                    X_sequences.append(feature_array)
-                    y_labels.append(1)  # Seizure label
+                    # seizure mask
+                    if ch_idx in seizure_channels:
+                        seizure_mask_list.append(1)
+                    else:
+                        seizure_mask_list.append(0)
 
-        # Process interictal data (non-seizure)
-        interictal_data = seizure.interictal_transformed
-        n_segments, n_channels, n_windows, n_features = interictal_data.shape
-
-        if n_windows < window_size:
-            print(f"Warning: interictal data has only {n_windows} windows, but window_size is {window_size}.")
-        else:
-            for segment_idx in range(n_segments):
-                for channel_idx in range(n_channels):
-                    # Get feature time series for this segment and channel
-                    feature_array = interictal_data[segment_idx, channel_idx]
-
-                    # Add to lists
-                    X_sequences.append(feature_array)
-                    y_labels.append(0)  # Non-seizure label
-
-        # Process postictal data (also non-seizure but post-seizure)
-        postictal_data = seizure.postictal_transformed
-        n_segments, n_channels, n_windows, n_features = postictal_data.shape
-
-        if n_windows < window_size:
-            print(f"Warning: postictal data has only {n_windows} windows, but window_size is {window_size}.")
-        else:
-            for segment_idx in range(n_segments):
-                for channel_idx in range(n_channels):
-                    # Get feature time series for this segment and channel
-                    feature_array = postictal_data[segment_idx, channel_idx]
-
-                    # Add to lists
-                    X_sequences.append(feature_array)
-                    y_labels.append(0)  # Non-seizure label (postictal)
-
-        # Convert to numpy arrays
-        data = np.array(X_sequences)
-        labels = np.array(y_labels)
-
-        # For compatibility with the model, ensure data is shaped as [Samples, Channels, Time]
-        # In this case, our "channels" dimension is the features dimension
-        # Reshape from [Samples, Window_size, Features] to [Samples, Features, Window_size]
-        data = np.transpose(data, (0, 2, 1))
-
-    elif input_type == 'combined':
-        # Combine raw data and transformed features
-        # First process raw data
-        seizure_data = seizure.ictal
-        nonseizure_data = np.concatenate((seizure.interictal, seizure.postictal), axis=0)
-
-        # Transpose raw data
-        seizure_data_raw = seizure_data.transpose(0, 2, 1)
-        nonseizure_data_raw = nonseizure_data.transpose(0, 2, 1)
-
-        # Flatten raw data
-        n_seizure_channels = seizure_data_raw.shape[1]
-        n_nonseizure_channels = nonseizure_data_raw.shape[1]
-
-        seizure_data_flat = np.concatenate([seizure_data_raw[:, i, :] for i in range(n_seizure_channels)], axis=0)
-        nonseizure_data_flat = np.concatenate([nonseizure_data_raw[:, i, :] for i in range(n_nonseizure_channels)],
-                                              axis=0)
-
-        # Remove inactive samples from raw data
-        sample_activity = np.sum(np.abs(seizure_data_flat), axis=1)
-        active_samples = sample_activity.squeeze() > min_activity_threshold
-
-        if np.sum(active_samples) == 0:
-            print("Warning: No active samples found in seizure data. Check your data or threshold.")
-        else:
-            n_removed = len(active_samples) - np.sum(active_samples)
-            print(f"Removed {n_removed} zero-padded samples out of {len(active_samples)} total samples")
-            seizure_data_flat = seizure_data_flat[active_samples]
-
-        # Now process transformed data
-        X_sequences = []
-        raw_segments = []
-        y_labels = []
-
-        # Process ictal data (seizure)
-        ictal_transformed = seizure.ictal_transformed
-        ictal_raw = seizure.ictal
-        n_segments, n_channels, n_windows, n_features = ictal_transformed.shape
-
-        for segment_idx in range(n_segments):
-            for channel_idx in range(n_channels):
-                # Get feature time series
-                feature_array = ictal_transformed[segment_idx, channel_idx]
-
-                # Get corresponding raw data
-                raw_data = ictal_raw[segment_idx, :, channel_idx]
-
-                # Skip if not enough windows
-                if n_windows < window_size:
-                    continue
-
-                # Create sequences
-                for i in range(0, n_windows - window_size + 1, sliding_step):
-                    sequence = feature_array[i:i + window_size]
-                    X_sequences.append(sequence)
-                    raw_segments.append(raw_data)
-                    y_labels.append(1)  # Seizure label
-
-        # Process interictal and postictal data
-        for state, data_source in [("interictal", seizure.interictal), ("postictal", seizure.postictal)]:
-            transformed_data = getattr(seizure, f"{state}_transformed")
-            raw_data = data_source
-            n_segments, n_channels, n_windows, n_features = transformed_data.shape
-
-            for segment_idx in range(n_segments):
-                for channel_idx in range(n_channels):
-                    # Get feature time series
-                    feature_array = transformed_data[segment_idx, channel_idx]
-
-                    # Get corresponding raw data
-                    segment_raw = raw_data[segment_idx, :, channel_idx]
-
-                    # Skip if not enough windows
-                    if n_windows < window_size:
-                        continue
-
-                    # Create sequences
-                    for i in range(0, n_windows - window_size + 1, sliding_step):
-                        sequence = feature_array[i:i + window_size]
-                        X_sequences.append(sequence)
-                        raw_segments.append(segment_raw)
-                        y_labels.append(0)  # Non-seizure label
-
-        # Convert to numpy arrays
-        feature_data = np.array(X_sequences)
-        raw_data = np.array(raw_segments)
-        labels = np.array(y_labels)
-
-        # Reshape for model compatibility
-        feature_data = np.transpose(feature_data, (0, 2, 1))  # [Samples, Features, Window_size]
-        raw_data = np.expand_dims(raw_data, axis=1)  # [Samples, 1, Time]
-
-        # Combine data (this approach concatenates along the channel dimension)
-        # You might need to adjust depending on your model architecture
-        # For example, you might need a different approach like having two inputs
-        # This is a simplistic approach assuming your model can handle varying channel counts
-        data = np.concatenate([raw_data, feature_data], axis=1)
+        # Process non-seizure segments
+        offset_seg_idx = seizure_data.shape[0]
+        for seg_idx, segment in enumerate(nonseizure_data):
+            for ch_idx, signal in enumerate(segment):
+                if np.max(np.abs(signal)) > min_activity_threshold:
+                    signal = signal.transpose(1, 0)  # (features, time_steps)
+                    data_list.append(signal)
+                    label_list.append(0)
+                    channel_idx_list.append(ch_idx)
+                    time_idx_list.append(seg_idx)
+                    seizure_mask_list.append(0)
+                    grey_matter_list.append(0)
 
     else:
-        raise ValueError("Invalid input_type. Choose 'raw', 'transformed', or 'combined'.")
+        raise ValueError("Invalid input_type. Choose 'raw' or 'transformed'.")
 
-    # Shuffle the data
-    shuffled_indices = np.random.permutation(len(data))
-    data = data[shuffled_indices]
-    labels = labels[shuffled_indices]
+    # Convert to numpy arrays
+    X = np.array(data_list)
+    y = np.array(label_list)
+    channel_idx = np.array(channel_idx_list)
+    time_idx = np.array(time_idx_list)
+    seizure_mask = np.array(seizure_mask_list)
+    grey_values = np.array(grey_matter_list) if grey_matter_list else None
 
-    # Create a balanced dataset
-    seizure_indices = np.where(labels == 1)[0]
-    nonseizure_indices = np.where(labels == 0)[0]
+    # Shuffle
+    indices = np.random.permutation(len(X))
+    X = X[indices]
+    y = y[indices]
+    channel_idx = channel_idx[indices]
+    time_idx = time_idx[indices]
+    seizure_mask = seizure_mask[indices]
+    if grey_values is not None:
+        grey_values = grey_values[indices]
 
-    n_samples = min(len(seizure_indices), len(nonseizure_indices))
-    if n_samples == 0:
-        raise ValueError("No valid samples found after filtering. Check your data and threshold.")
+    # Balanced sample (optional)
+    pos_idx = np.where(y == 1)[0]
+    neg_idx = np.where(y == 0)[0]
+    n_samples = min(len(pos_idx), len(neg_idx))
+    pos_idx = np.random.choice(pos_idx, n_samples, replace=False)
+    neg_idx = np.random.choice(neg_idx, n_samples, replace=False)
 
-    print(f"Using {n_samples} samples from each class for balanced dataset")
+    balanced_idx = np.concatenate([pos_idx, neg_idx])
+    X = X[balanced_idx]
+    y = y[balanced_idx]
+    channel_idx = channel_idx[balanced_idx]
+    time_idx = time_idx[balanced_idx]
+    seizure_mask = seizure_mask[balanced_idx]
+    if grey_values is not None:
+        grey_values = grey_values[balanced_idx]
 
-    seizure_indices = np.random.choice(seizure_indices, n_samples, replace=False)
-    nonseizure_indices = np.random.choice(nonseizure_indices, n_samples, replace=False)
+    # Train/Val split
+    n_train = int(train_percentage * len(X))
+    X_train, X_val = X[:n_train], X[n_train:]
+    y_train, y_val = y[:n_train], y[n_train:]
+    channel_idx_train, channel_idx_val = channel_idx[:n_train], channel_idx[n_train:]
+    time_idx_train, time_idx_val = time_idx[:n_train], time_idx[n_train:]
+    seizure_mask_train, seizure_mask_val = seizure_mask[:n_train], seizure_mask[n_train:]
 
-    data = np.concatenate((data[seizure_indices], data[nonseizure_indices]), axis=0)
-    labels = np.concatenate((labels[seizure_indices], labels[nonseizure_indices]), axis=0)
+    if grey_values is not None:
+        grey_train, grey_val = grey_values[:n_train], grey_values[n_train:]
+    else:
+        grey_train = grey_val = None
 
-    # Use stratified sampling for train/val split
-    sss = StratifiedShuffleSplit(n_splits=1, test_size=1 - train_percentage, random_state=0)
-    for train_index, val_index in sss.split(data, labels):
-        train_data, val_data = data[train_index], data[val_index]
-        train_labels, val_labels = labels[train_index], labels[val_index]
-
-    # Create the data loaders
-    train_dataset = CustomDataset(train_data, train_labels)
-    val_dataset = CustomDataset(val_data, val_labels)
+    train_dataset = CustomDataset(X_train, y_train, channel_idx_train, time_idx_train, seizure_mask_train, grey_train)
+    val_dataset = CustomDataset(X_val, y_val, channel_idx_val, time_idx_val, seizure_mask_val, grey_val)
 
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
 
-    print(f"Final dataset shapes - Training: {train_data.shape}, Validation: {val_data.shape}")
+    print(f"Final dataset shapes - Train: {X_train.shape}, Val: {X_val.shape}")
 
     return train_loader, val_loader
 
@@ -788,6 +860,9 @@ def construct_channel_recognition_dataset(results_propagation_total, seizure_ons
     )
 
     return channel_train, channel_val, onset_train, onset_val
+
+
+
 
 
 if __name__ == "__main__":

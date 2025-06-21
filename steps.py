@@ -23,8 +23,9 @@ from plotFun import plot_time_limited_heatmap, plot_eeg_style
 from datasetConstruct import (combine_loaders,
                               load_seizure_across_patients, create_dataset,
                               EDFData, load_single_seizure)
-from models import (train_using_optimizer, evaluate_model, output_to_probability, Wavenet, CNN1D,
-                    LSTM, S4Model, ResNet, hyperparameter_search_for_model)
+from models import (train_using_optimizer, evaluate_model, output_to_probability,
+                    Wavenet, CNN1D,LSTM, S4Model, ResNet, EnhancedResNet,
+                    hyperparameter_search_for_model, train_using_optimizer_with_masks)
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -309,9 +310,12 @@ class EEGTimeSeriesFeatureExtractor:
 
         # Define frequency bands (Hz)
         self.freq_bands = {
+            'delta': (0.5, 4),
+            'theta': (4, 8),
+            'alpha': (8, 13),
             'beta': (13, 30),
             'gamma': (30, 100),
-            'high_gamma': (100, 200),
+            'high_gamma': (100, min(200, sampling_rate // 2)),
         }
 
     def extract_half_wave_features(self, signal_window, amplitude_threshold=0.1):
@@ -475,40 +479,6 @@ class EEGTimeSeriesFeatureExtractor:
         m3 = np.sum((x - mean) ** 3) / n
         return m3 / (std ** 3)
 
-    def extract_hjorth_parameters(self, signal_window):
-        """
-        Extract Hjorth parameters (activity, mobility, complexity).
-
-        Args:
-            signal_window: 1D array of signal values
-
-        Returns:
-            Dictionary of Hjorth parameters
-        """
-        # Calculate first and second derivatives
-        diff1 = np.diff(signal_window)
-        diff2 = np.diff(diff1)
-
-        # Pad the derivatives to match original length
-        diff1 = np.append(diff1, diff1[-1])
-        diff2 = np.append(diff2, [diff2[-1], diff2[-1]])
-
-        # Calculate variance of signal and derivatives
-        var0 = np.var(signal_window)
-        var1 = np.var(diff1)
-        var2 = np.var(diff2)
-
-        # Calculate Hjorth parameters
-        activity = var0
-        mobility = np.sqrt(var1 / var0) if var0 > 0 else 0
-        complexity = np.sqrt(var2 / var1) / mobility if mobility > 0 and var1 > 0 else 0
-
-        return {
-            'hjorth_activity': activity,
-            'hjorth_mobility': mobility,
-            'hjorth_complexity': complexity
-        }
-
     def extract_features_from_window(self, signal_window):
         """
         Extract all features from a single window of EEG data.
@@ -662,6 +632,7 @@ def extract_sEEG_features(seizure_object, sampling_rate=128, window_duration=0.0
     save_path = os.path.join(f'data/P{seizure_object.patNo}', f"seizure_{seizure_object.seizureNumber}_combined.pkl")
     with open(save_path, 'wb') as f:
         pickle.dump(seizure_object, f)
+        print(f"Saved transformed seizure data to {save_path}")
 
     return seizure_object
 
@@ -684,7 +655,7 @@ def setup_and_train_models(
     Args:
         data_folder: Path to data folder
         model_folder: Path to save/load model checkpoints
-        model_names: List of model names to use ['CNN1D', 'Wavenet', 'LSTM']
+        model_names: List of model names to use ['CNN1D', 'Wavenet', 'LSTM', 'EnhancedResNet']
                     If None, uses all available models
         train: Whether to train models or load pretrained weights
         input_type: Type of input data ('raw', 'transformed', or 'combined')
@@ -697,13 +668,15 @@ def setup_and_train_models(
     Returns:
         dict: Dictionary containing trained models and their performance metrics
     """
+
     # Available models
     AVAILABLE_MODELS = {
         'CNN1D': lambda ch, ts, lr: CNN1D(input_dim=ch, kernel_size=ts, output_dim=2, lr=lr),
         'Wavenet': lambda ch, ts, lr: Wavenet(input_dim=ch, output_dim=2, kernel_size=ts, lr=lr),
         'LSTM': lambda ch, ts, lr: LSTM(input_dim=ch, output_dim=2, lr=lr),
         'S4': lambda ch, ts, lr: S4Model(d_input=ch, d_output=2, lr=lr),
-        'ResNet': lambda ch, ts, lr: ResNet(input_dim=ch, n_classes=2, lr=lr, kernel_size=ts, base_filters=32)
+        'ResNet': lambda ch, ts, lr: ResNet(input_dim=ch, n_classes=2, lr=lr, kernel_size=ts, base_filters=32),
+        'EnhancedResNet': lambda ch, ts, lr: EnhancedResNet(input_dim=ch, kernel_size=ts, lr=lr)
     }
 
     # Default parameters
@@ -745,7 +718,7 @@ def setup_and_train_models(
 
         # Get the shape from a sample
         sample_batch = next(iter(train_loader))
-        channels, time_steps = sample_batch[0][0].shape
+        channels, time_steps = sample_batch['data'][0].shape
 
         return train_loader, val_loader, channels, time_steps
 
@@ -772,7 +745,7 @@ def setup_and_train_models(
         }
 
         # Initialize default search space if not provided
-        if search_space is None:
+        if search_space is None and hyperparameter_search:
             search_space = {
                 'lr': {'type': 'loguniform', 'range': [1e-5, 1e-2]},
                 'batch_size': {'type': 'categorical', 'values': [512, 1024, 2048, 4096]},
@@ -780,6 +753,13 @@ def setup_and_train_models(
                 'dropout': {'type': 'uniform', 'range': [0.1, 0.5]},
                 'kernel_size': {'type': 'categorical', 'values': [32, 64, 128, 256, 512]},
             }
+
+            # Add EnhancedResNet specific parameters if included in model_names
+            if 'EnhancedResNet' in model_names:
+                search_space.update({
+                    'gamma': {'type': 'uniform', 'range': [0.1, 1.0]},  # Anatomical constraint weight
+                    'delta': {'type': 'uniform', 'range': [0.1, 1.0]},  # Temporal consistency weight
+                })
 
         # If hyperparameter search is enabled, find the best parameters for each model
         if hyperparameter_search and train:
@@ -806,11 +786,21 @@ def setup_and_train_models(
                 results['best_hyperparameters'][model_name] = best_params
 
                 # Initialize model with best parameters
-                model = AVAILABLE_MODELS[model_name](channels, time_steps, model_params['lr'])
+                if model_name == 'EnhancedResNet':
+                    model = EnhancedResNet(
+                        input_dim=channels,
+                        base_filters=32,
+                        kernel_size=model_params.get('kernel_size', time_steps),
+                        dropout=model_params.get('dropout', 0.2),
+                        lr=model_params['lr'],
+                        gamma=model_params.get('gamma', 0.5),  # Use optimized gamma if found
+                        delta=model_params.get('delta', 0.5)  # Use optimized delta if found
+                    )
+                else:
+                    model = AVAILABLE_MODELS[model_name](channels, time_steps, model_params['lr'])
 
-                # Update model configuration if needed
+                # Update dropout if needed
                 if 'dropout' in best_params and hasattr(model, 'dropout'):
-                    # Attempt to set dropout - implementation depends on model architecture
                     try:
                         for module in model.modules():
                             if isinstance(module, nn.Dropout):
@@ -850,7 +840,12 @@ def setup_and_train_models(
             for name, model in models.items():
                 print(f"\nTraining {name}...")
 
-                train_loss, val_loss, val_accuracy = train_using_optimizer(
+                if isinstance(model, EnhancedResNet):
+                    train_func = train_using_optimizer_with_masks
+                else:
+                    train_func = train_using_optimizer
+
+                train_loss, val_loss, val_accuracy = train_func(
                     model=model,
                     trainloader=train_loader,
                     valloader=val_loader,
