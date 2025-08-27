@@ -282,33 +282,10 @@ def preprocessing(dataset, data_folder: str):
 
 
 class EEGTimeSeriesFeatureExtractor:
-    """
-    Extracts time-series features from EEG signals by calculating features
-    in sliding windows across the signal.
-
-    Features include:
-    - Half-wave features
-    - Line length
-    - Signal area (energy)
-    - Frequency band powers (delta, theta, alpha, beta, gamma)
-    """
-
     def __init__(self, sampling_rate=128, window_duration=0.05, window_step=0.025):
-        """
-        Initialize the feature extractor with moving window parameters.
-
-        Args:
-            sampling_rate: Number of samples per second in the EEG data
-            window_duration: Duration of sliding window in seconds (default: 50ms)
-            window_step: Step size for window sliding in seconds (default: 25ms)
-        """
         self.sampling_rate = sampling_rate
-
-        # Calculate window sizes in samples
         self.window_samples = int(window_duration * sampling_rate)
         self.step_samples = int(window_step * sampling_rate)
-
-        # Define frequency bands (Hz)
         self.freq_bands = {
             'delta': (0.5, 4),
             'theta': (4, 8),
@@ -319,49 +296,21 @@ class EEGTimeSeriesFeatureExtractor:
         }
 
     def extract_half_wave_features(self, signal_window, amplitude_threshold=0.1):
-        """
-        Extract features based on half-wave analysis with amplitude thresholding.
-
-        Args:
-            signal_window: 1D array of signal values
-            amplitude_threshold: Minimum amplitude (in units of the signal) to consider a half-wave
-
-        Returns:
-            Dictionary of half-wave features
-        """
-        # Find zero crossings
         zero_crossings = np.where(np.diff(np.signbit(signal_window)))[0]
-
-        # If no zero crossings found, return zeros
         if len(zero_crossings) <= 1:
-            return {
-                'hw_count': 0,
-                'hw_mean_amp': 0,
-                'hw_mean_duration': 0
-            }
-
-        # Compute half-wave amplitudes and durations
+            return {'hw_count': 0, 'hw_mean_amp': 0, 'hw_mean_duration': 0}
         half_wave_amps = []
         half_wave_durations = []
-
         for i in range(len(zero_crossings) - 1):
             start_idx = zero_crossings[i]
             end_idx = zero_crossings[i + 1]
-
-            # Calculate half-wave duration in samples
             duration = end_idx - start_idx
-
-            # Get max amplitude in this half-wave
             segment = signal_window[start_idx:end_idx]
             if len(segment) > 0:
                 amplitude = np.max(np.abs(segment))
-
-                # Only include half-waves that exceed the amplitude threshold
                 if amplitude >= amplitude_threshold:
                     half_wave_amps.append(amplitude)
                     half_wave_durations.append(duration)
-
-        # Return features
         return {
             'hw_count': len(half_wave_amps),
             'hw_mean_amp': np.mean(half_wave_amps) if half_wave_amps else 0,
@@ -369,94 +318,12 @@ class EEGTimeSeriesFeatureExtractor:
         }
 
     def extract_line_length(self, signal_window):
-        """
-        Compute line length feature.
-
-        Args:
-            signal_window: 1D array of signal values
-
-        Returns:
-            Line length value
-        """
         return np.sum(np.abs(np.diff(signal_window)))
 
     def extract_area(self, signal_window):
-        """
-        Compute area under the curve (signal energy).
-
-        Args:
-            signal_window: 1D array of signal values
-
-        Returns:
-            Area value
-        """
         return np.sum(np.abs(signal_window))
 
-    def extract_frequency_bands(self, signal_window):
-        """
-        Extract power in standard frequency bands using FFT.
-
-        Args:
-            signal_window: 1D array of signal values
-
-        Returns:
-            Dictionary of band powers
-        """
-        # Apply Hamming window to reduce spectral leakage
-        windowed_signal = signal_window * np.hamming(len(signal_window))
-
-        # Compute FFT
-        fft_vals = fft(windowed_signal)
-        fft_abs = np.abs(fft_vals[:len(signal_window) // 2])
-
-        # Normalize by window length
-        fft_abs = fft_abs / len(signal_window)
-
-        # Calculate frequency bins
-        freq_bins = np.fft.fftfreq(len(signal_window), 1 / self.sampling_rate)[:len(signal_window) // 2]
-
-        # Calculate band powers
-        band_powers = {}
-        for band_name, (low_freq, high_freq) in self.freq_bands.items():
-            band_mask = (freq_bins >= low_freq) & (freq_bins <= high_freq)
-            band_power = np.sum(fft_abs[band_mask] ** 2)
-            band_powers[f'power_{band_name}'] = band_power
-
-        # Calculate relative band powers
-        total_power = sum(band_powers.values())
-        if total_power > 0:
-            for band_name in self.freq_bands.keys():
-                band_powers[f'rel_power_{band_name}'] = band_powers[f'power_{band_name}'] / total_power
-        else:
-            for band_name in self.freq_bands.keys():
-                band_powers[f'rel_power_{band_name}'] = 0
-
-        return band_powers
-
-    def extract_statistical_features(self, signal_window):
-        """
-        Extract basic statistical features from the signal.
-
-        Args:
-            signal_window: 1D array of signal values
-
-        Returns:
-            Dictionary of statistical features
-        """
-        return {
-            'mean': np.mean(signal_window),
-            'std': np.std(signal_window),
-            'kurtosis': self._kurtosis(signal_window),
-            'skewness': self._skewness(signal_window),
-            'max': np.max(signal_window),
-            'min': np.min(signal_window),
-            'peak_to_peak': np.max(signal_window) - np.min(signal_window),
-            'energy': np.sum(signal_window ** 2),
-            'rms': np.sqrt(np.mean(signal_window ** 2))
-        }
-
     def _kurtosis(self, x):
-        """Compute kurtosis of a signal"""
         n = len(x)
         if n < 4:
             return 0
@@ -465,10 +332,9 @@ class EEGTimeSeriesFeatureExtractor:
         if std == 0:
             return 0
         m4 = np.sum((x - mean) ** 4) / n
-        return m4 / (std ** 4) - 3  # -3 to make normal distribution have kurtosis=0
+        return m4 / (std ** 4) - 3
 
     def _skewness(self, x):
-        """Compute skewness of a signal"""
         n = len(x)
         if n < 3:
             return 0
@@ -480,83 +346,80 @@ class EEGTimeSeriesFeatureExtractor:
         return m3 / (std ** 3)
 
     def extract_features_from_window(self, signal_window):
-        """
-        Extract all features from a single window of EEG data.
-
-        Args:
-            signal_window: 1D array of signal values
-
-        Returns:
-            Dictionary of all features
-        """
         features = {}
+        if len(signal_window) < 10 or np.all(signal_window == 0):
+            return {key: 0 for key in [
+                'mean', 'std', 'median', 'iqr', 'skew', 'kurtosis', 'range', 'rms',
+                'zero_crossings', 'hw_count', 'hw_mean_amp', 'hw_mean_duration',
+                'line_length', 'area', 'spectral_entropy', 'total_power'
+            ] + [f'power_{b}' for b in self.freq_bands]}
 
-        # Extract half-wave features
+        features['mean'] = np.mean(signal_window)
+        features['std'] = np.std(signal_window)
+        features['median'] = np.median(signal_window)
+        features['iqr'] = np.percentile(signal_window, 75) - np.percentile(signal_window, 25)
+        features['range'] = np.max(signal_window) - np.min(signal_window)
+        features['rms'] = np.sqrt(np.mean(signal_window ** 2))
+        features['zero_crossings'] = np.sum(np.diff(np.signbit(signal_window).astype(int)) != 0)
+
+        features['skew'] = self._skewness(signal_window)
+        features['kurtosis'] = self._kurtosis(signal_window)
+
         features.update(self.extract_half_wave_features(signal_window))
-
-        # Add line length feature
         features['line_length'] = self.extract_line_length(signal_window)
-
-        # Add area feature
         features['area'] = self.extract_area(signal_window)
 
-        # Add frequency band powers
-        features.update(self.extract_frequency_bands(signal_window))
+        try:
+            windowed_signal = signal_window * np.hamming(len(signal_window))
+            fft_vals = fft(windowed_signal)
+            fft_abs = np.abs(fft_vals[:len(signal_window) // 2])
+            fft_abs = fft_abs / len(signal_window)
+            freq_bins = np.fft.fftfreq(len(signal_window), 1 / self.sampling_rate)[:len(signal_window) // 2]
+
+            total_power = 0
+            for band_name, (low_freq, high_freq) in self.freq_bands.items():
+                band_mask = (freq_bins >= low_freq) & (freq_bins <= high_freq)
+                band_power = np.sum(fft_abs[band_mask] ** 2)
+                features[f'power_{band_name}'] = band_power
+                total_power += band_power
+
+            features['total_power'] = total_power
+
+            if total_power > 0:
+                power_spectrum = fft_abs ** 2
+                pxx_norm = power_spectrum / np.sum(power_spectrum)
+                features['spectral_entropy'] = -np.sum(pxx_norm * np.log2(pxx_norm + 1e-10))
+            else:
+                features['spectral_entropy'] = 0
+
+        except Exception:
+            for band_name in self.freq_bands:
+                features[f'power_{band_name}'] = 0
+            features['spectral_entropy'] = 0
+            features['total_power'] = 0
 
         return features
 
     def extract_time_series_features(self, signal_segment):
-        """
-        Extract time-series features from a 1-second segment using a moving window approach.
-        Each window produces a feature vector, maintaining the time-series nature of the data.
-
-        Args:
-            signal_segment: 1D array of signal values (1-second segment)
-
-        Returns:
-            2D array of features with shape (n_windows, n_features)
-            List of feature names
-        """
-        # Check if segment is long enough for sliding window
         if len(signal_segment) < self.window_samples:
-            raise ValueError(
-                f"Signal segment length ({len(signal_segment)}) is shorter than window size ({self.window_samples})")
-
-        # Initialize list to store features from each window
+            raise ValueError(f"Segment too short: {len(signal_segment)} < {self.window_samples}")
         window_features_list = []
         window_times = []
-
-        # Slide window through the segment
         for start_idx in range(0, len(signal_segment) - self.window_samples + 1, self.step_samples):
             end_idx = start_idx + self.window_samples
-            window_time = start_idx / self.sampling_rate  # Time in seconds from start of segment
-
-            # Extract window
             window = signal_segment[start_idx:end_idx]
-
-            # Extract features from this window
-            window_features = self.extract_features_from_window(window)
-
-            # Add to list
-            window_features_list.append(window_features)
+            window_time = start_idx / self.sampling_rate
+            features = self.extract_features_from_window(window)
+            window_features_list.append(features)
             window_times.append(window_time)
-
-        # Get feature names from the first window (if available)
         feature_names = list(window_features_list[0].keys()) if window_features_list else []
-
-        # Convert list of dictionaries to 2D array
-        # Each row is a window, each column is a feature
         feature_array = np.zeros((len(window_features_list), len(feature_names)))
-
-        for i, features in enumerate(window_features_list):
-            for j, feature_name in enumerate(feature_names):
-                feature_array[i, j] = features[feature_name]
-
-        # Normalize feature array for each feature
-        scaler = RobustScaler()
-        feature_array = scaler.fit_transform(feature_array)
-
+        for i, feat in enumerate(window_features_list):
+            for j, name in enumerate(feature_names):
+                feature_array[i, j] = feat[name]
+        feature_array = RobustScaler().fit_transform(feature_array)
         return feature_array, feature_names, window_times
+
 
 
 def extract_sEEG_features(seizure_object, sampling_rate=128, window_duration=0.05, window_step=0.025):
@@ -929,7 +792,8 @@ def analyze_seizure_propagation(
         data_folder: str = 'data',
         marking_file: str = 'data/Seizure_Onset_Type_ML_USC.xlsx',
         params: Optional[Dict] = None,
-        save_results_ind: bool = True
+        save_results_ind: bool = True,
+        recalculate_features: bool = False
 ) -> Dict:
     """
     Analyze seizure propagation for a specific patient and seizure
@@ -950,7 +814,7 @@ def analyze_seizure_propagation(
         'threshold': 0.8,
         'smooth_window': 50,
         'n_seconds': 80,
-        'seizure_start': 10,
+        'seizure_start': 60,
         'seizure_plot_time': 10, # How many seconds to plot before seizrue starts
         'overlap': 0.8,
         'device': 'cuda:0'
@@ -990,7 +854,7 @@ def analyze_seizure_propagation(
         # Load seizure data
         seizure_obj = load_single_seizure(single_seizure_folder, seizure_no)
 
-        if not hasattr(seizure_obj, 'ictal_transformed'):
+        if not hasattr(seizure_obj, 'ictal_transformed') or recalculate_features:
             seizure_obj = extract_sEEG_features(seizure_obj, sampling_rate=seizure_obj.samplingRate)
 
         # Load Matter file

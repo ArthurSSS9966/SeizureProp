@@ -139,7 +139,7 @@ def reconsEDF(raw, gridmap, PAT_NO):
     SZOFF_time = int(raw.annotations.onset[SZOFF_ind] * samplingRate)
 
     # Define the preictal range
-    pre_range = int(60*raw.info["sfreq"])  # 10 seconds before EOF and after SOF, also 10 seconds before Seizure
+    pre_range = int(60*raw.info["sfreq"])  # 60 seconds before EOF and after SOF, also 10 seconds before Seizure
 
     # Extract the preictal and ictal data
     ictal_data = data[SZ_time:SZOFF_time, :]

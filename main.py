@@ -7,7 +7,7 @@ from time import time
 DATA_FOLDER = "data"
 RESULT_FOLDER = "result"
 MODEL_FOLDER = "model"
-PAT_NOs = [65,66]
+PAT_NOs = [65]
 preprocessDataset = True
 
 if __name__ == "__main__":
@@ -29,7 +29,7 @@ if __name__ == "__main__":
 
                     seizure_number = datafile.split("_")[-1].split(".")[0]
                     print(f"Seizure Number: {seizure_number}")
-                    dataset.seizure_number = seizure_number
+                    dataset.seizureNumber = seizure_number
                     # init_examination(dataset, 20, RESULT_FOLDER, start_time=-3, end_time=7)
 
                     try:
