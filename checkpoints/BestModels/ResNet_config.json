@@ -1,0 +1,19 @@
+{
+  "trial_number": 14,
+  "model_class": "ResNet",
+  "parameters": {
+    "lr": 0.000144039109322085,
+    "weight_decay": 3.0789594164416115e-06,
+    "base_filters": 128,
+    "kernel_size": 16,
+    "dropout": 0.13138495398671235,
+    "n_blocks": 3
+  },
+  "timestamp": "2025-08-24T17:05:33.764879",
+  "results": {
+    "best_val_accuracy": 0.6405403901050405,
+    "final_train_loss": 0.6065219290615097,
+    "final_val_loss": 0.7174198293104405,
+    "converged_epochs": 15
+  }
+}

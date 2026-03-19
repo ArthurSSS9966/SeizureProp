@@ -1,0 +1,20 @@
+{
+  "trial_number": 11,
+  "model_class": "CustomTransformerSeizurePredictor",
+  "parameters": {
+    "lr": 0.00015489876072452417,
+    "d_model": 1024,
+    "n_heads": 16,
+    "n_layers": 4,
+    "d_ff": 2048,
+    "dropout": 0.28493783456865823,
+    "weight_decay": 1.1407905960351173e-06
+  },
+  "timestamp": "2025-08-24T11:23:35.562879",
+  "results": {
+    "best_val_accuracy": 0.6917168279514316,
+    "final_train_loss": 0.5498092348982648,
+    "final_val_loss": 0.5834761853140544,
+    "converged_epochs": 15
+  }
+}
