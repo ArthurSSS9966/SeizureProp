@@ -61,7 +61,7 @@
 /docs/*
 !/docs/README.md
 !/docs/data_publication_policy.md
-!/docs/offline_nwb_workflow.md
+!/docs/offline_edf_workflow.md
 # Proposals and proposal reviews remain private under /docs/*.
 
 # Cohort-bound drivers and report templates embed individual clinical details

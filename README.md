@@ -45,7 +45,7 @@ per-patient results are treated as private. See the
 ## Supported workflow
 
 `prepare` validates already prepared, hash-pinned feature caches; it does not
-convert raw NWB/EDF. A local manifest declares units, canonical features,
+convert raw EDF. A local manifest declares units, canonical features,
 channel identities, target definitions and patient partitions.
 
 ```powershell
@@ -75,9 +75,9 @@ it is a retrospective metric, not a live confidence score. Average recordings
 and seeds within patients before averaging patients.
 
 The proposed app is an offline review tool on a separate local computer, using
-manually transferred NWB recordings. A validated NWB adapter and UI remain to
+manually transferred EDF recordings. A validated EDF adapter and UI remain to
 be built; current inference consumes prepared features. See the
-[offline workflow](docs/offline_nwb_workflow.md).
+[offline workflow](docs/offline_edf_workflow.md).
 Anatomy may display unchanged scores; anatomy-based filtering is a separate
 analysis. This repository does not claim validated recruitment times, directed
 propagation pathways, calibrated confidence or automatic white-matter rejection.

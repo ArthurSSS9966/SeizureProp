@@ -3,7 +3,7 @@
 Install from the repository root with `python -m pip install -e .` using Python
 3.10+. The package exposes `prepare`, `run` and `predict` through
 `python -m seizureprop`. See the [root guide](../../README.md) for commands and the
-[offline NWB workflow](../../docs/offline_nwb_workflow.md) for planned UI scope.
+[offline EDF workflow](../../docs/offline_edf_workflow.md) for planned UI scope.
 
 ## Supported interface
 
@@ -20,7 +20,7 @@ result = predict(
 
 Use a trusted, fixed checkpoint and its matching feature preparation. Inference
 runs on CPU, uses the checkpoint scaler, and does not fit on the uploaded seizure.
-The current interface consumes prepared features, not raw NWB/EDF or a live stream.
+The current interface consumes prepared features, not raw EDF or a live stream.
 It neither loads imaging nor requires clinical/tissue labels.
 
 ## Input contract
@@ -82,12 +82,13 @@ represent the pair explicitly and document any display-only midpoint convention.
   predictor. Their existence does not establish a validated detector/tissue model.
 - No continuous detector, recruitment estimator, directed propagation network,
   imaging registration, GUI or calibrated confidence API is currently provided.
-- The intended app starts with NWB files manually transferred from Natus to a
-  separate local computer. A validated NWB-to-feature adapter is required; it is
+- The intended app starts with EDF files manually transferred from Natus to a
+  separate local computer. A validated EDF-to-feature adapter is required; it is
   not implemented by `prepare` or `predict`. See the
-  [offline NWB workflow](../../docs/offline_nwb_workflow.md).
-- Existing EDF research adapters remain useful for prior datasets. The app's
-  input priority is now NWB; it need not convert NWB to EDF to run inference.
+  [offline EDF workflow](../../docs/offline_edf_workflow.md).
+- Existing dataset-specific EDF research adapters provide a starting point.
+  Their loading and preprocessing must be generalized and validated for the app
+  against the selected checkpoint and representative recordings.
 
 Scientific reports with patient-level results remain local under the
 [data policy](../../docs/data_publication_policy.md). Do not treat software compatibility tests
