@@ -82,5 +82,5 @@ preprocessing configuration, ordered pair IDs and checkpoint hash in each analys
 For local performance, measure file opening, selected-interval loading,
 preprocessing, inference and UI responsiveness. Live detection latency and
 false alarms per hour are not acceptance metrics for this onset-supplied review
-tool. The [proposal review](app_proposal_review_20261005.md) defines the remaining
-scientific and visualization boundaries.
+tool. The [package contract](../src/seizureprop/README.md) defines the current
+model outputs and scientific boundaries. Proposals and their reviews remain local.

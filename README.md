@@ -24,7 +24,7 @@ src/seizureprop/       # reusable data/features/models/training/inference packag
 configs/package_study/ # parameter recipes; local data and split files required
 tests/                # synthetic package and publication checks
 tools/                # source inventory and publication checks
-docs/                 # reviewed general documentation and app proposal
+docs/                 # public technical documentation
 legacy/third_party/   # archived third-party source; not installed
 ```
 
@@ -77,8 +77,7 @@ and seeds within patients before averaging patients.
 The proposed app is an offline review tool on a separate local computer, using
 manually transferred NWB recordings. A validated NWB adapter and UI remain to
 be built; current inference consumes prepared features. See the
-[offline workflow](docs/offline_nwb_workflow.md) and
-[proposal review](docs/app_proposal_review_20261005.md).
+[offline workflow](docs/offline_nwb_workflow.md).
 Anatomy may display unchanged scores; anatomy-based filtering is a separate
 analysis. This repository does not claim validated recruitment times, directed
 propagation pathways, calibrated confidence or automatic white-matter rejection.

@@ -3,7 +3,7 @@
 Install from the repository root with `python -m pip install -e .` using Python
 3.10+. The package exposes `prepare`, `run` and `predict` through
 `python -m seizureprop`. See the [root guide](../../README.md) for commands and the
-[app proposal review](../../docs/app_proposal_review_20261005.md) for planned UI scope.
+[offline NWB workflow](../../docs/offline_nwb_workflow.md) for planned UI scope.
 
 ## Supported interface
 

@@ -12,6 +12,7 @@ in local studies, contact mappings, annotations and patient-level provenance.
 - Notebook source and output, including embedded images and clinical text.
 - Study-specific JSON configurations, cohort splits, manifests and provenance.
 - Historical reports, manuscript drafts and audit inventories that contain IDs.
+- Project proposals and proposal reviews, even when they contain no patient data.
 - Cohort-specific scripts and private waveform code containing clinical details.
 - All checkpoint folders, model weights, archives, logs and tracking databases.
 - Secrets, local agent/editor configuration, bytecode and build outputs.

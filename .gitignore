@@ -62,8 +62,7 @@
 !/docs/README.md
 !/docs/data_publication_policy.md
 !/docs/offline_nwb_workflow.md
-!/docs/app_proposal_review_20261005.md
-!/docs/Real-Time SEEG Seizure Localization and Propagation Platform.pdf
+# Proposals and proposal reviews remain private under /docs/*.
 
 # Cohort-bound drivers and report templates embed individual clinical details
 /scripts/*
