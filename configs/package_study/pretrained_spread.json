@@ -1,0 +1,30 @@
+{
+  "manifest": "../../result/seeg_package_study/features.json",
+  "splits": "../../result/seeg_package_study/splits.json",
+  "output": "../../result/seeg_package_study/runs/pretrained_spread",
+  "protocol": "signal_context_chop_v1",
+  "model": "combined",
+  "hidden": 32,
+  "seeds": [
+    17,
+    29,
+    43
+  ],
+  "epochs": 80,
+  "patience": 15,
+  "learning_rate": 0.001,
+  "weight_decay": 0.001,
+  "focal_gamma": 2.0,
+  "rank_weight": 0.2,
+  "spread_weight": 0.5,
+  "selection": "onset",
+  "sampling": "patient_uniform",
+  "threads": 2,
+  "scaler_checkpoint": "../../result/seeg_external_allruns/transfer/all_runs/pretraining/seed17/best.pt",
+  "initialization_provenance": "../../result/seeg_package_study/initialization_provenance.json",
+  "initializations": {
+    "17": "../../result/seeg_external_allruns/transfer/all_runs/pretraining/seed17/best.pt",
+    "29": "../../result/seeg_external_allruns/transfer/all_runs/pretraining/seed29/best.pt",
+    "43": "../../result/seeg_external_allruns/transfer/all_runs/pretraining/seed43/best.pt"
+  }
+}

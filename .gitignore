@@ -1,47 +1,111 @@
-# Data
+# Private workspace, including coded/de-identified participant data
 /data/
 /data_test/
+/private/
+/local/
 /result/
-*.xlsx
+/results/
+/artifacts/
+/checkpoints/
+/reports/*
+!/reports/README.md
+
+# Clinical exports, feature caches, spreadsheets, serialized data/models
+*.edf
+*.bdf
+*.vhdr
+*.vmrk
+*.eeg
+*.nwb
+*.mat
+*.h5
+*.hdf5
+*.fif
+*.fif.gz
+*.nii
+*.nii.gz
+*.dcm
+*.npz
+*.npy
+*.pkl
+*.pickle
+*.pth
+*.pt
+*.ckpt
+*.safetensors
+*.onnx
 *.csv
+*.tsv
+*.xlsx
+*.xls
+*.parquet
+*.feather
+*.jsonl
+*.zip
+*.tar
+*.tar.gz
+*.7z
 
-# Python
-__pycache__/
-*.py[cod]
-*.pyo
-*.pyd
-.Python
-*.egg-info/
-.env
-.venv
-venv/
-
-# Jupyter
+# Notebook sources/outputs can contain IDs, clinical text and embedded images
+*.ipynb
 .ipynb_checkpoints/
+/notebooks/*
+!/notebooks/README.md
 
-# Model checkpoints (all .pth too large for GitHub)
-checkpoints/**/*.pth
-checkpoints/*.pth
-checkpoints/*.zip
-checkpoints/*.png
-checkpoints/optuna_trial_*/
-checkpoints/CNN1D_*/
-checkpoints/ResNet_epoch*/
-checkpoints/WaveResNet_epoch*/
-checkpoints/Wavenet_epoch*/
-checkpoints/EnhancedResNet_*/
-checkpoints/Transformer_best.pth
-checkpoints/ResNet/
-checkpoints/ResNet_final/
-checkpoints/Transformer_*/
-checkpoints/CustomTransformerSeizurePredictor/
-checkpoints/CustomTransformerSeizurePredictor_final/
-checkpoints/Wavenet/
-checkpoints/Wavenet_final/
-checkpoints/training_loss.png
-checkpoints/validation_accuracy.png
+# Study configs, subject lists, audit manifests and reports are local by default
+/configs/*
+!/configs/README.md
+!/configs/package_study/
+/configs/local.json
+/configs/package_study/*.local.*
+/docs/*
+!/docs/README.md
+!/docs/data_publication_policy.md
+!/docs/offline_nwb_workflow.md
+!/docs/app_proposal_review_20261005.md
+!/docs/Real-Time SEEG Seizure Localization and Propagation Platform.pdf
 
-# IDE
+# Cohort-bound drivers and report templates embed individual clinical details
+/scripts/*
+!/scripts/README.md
+!/scripts/seeg_external_predict.py
+/src/seizureprop/legacy/*
+!/src/seizureprop/legacy/README.md
+/tests/*
+!/tests/test_package.py
+!/tests/test_publication_guard.py
+/tools/*
+!/tools/README.md
+!/tools/audit_repository.py
+!/tools/check_publication.py
+
+# Individual-level exports accidentally written outside private folders
+**/participants.json
+**/participants.jsonl
+**/patient_ids.*
+**/patient_manifest.*
+**/patient_mapping.*
+**/subject_mapping.*
+**/per_patient*
+**/*_patient_metrics.*
+**/splits.json
+**/training_provenance.json
+
+# Credentials and local agent/editor state
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+credentials*.json
+secrets*.json
+/.claude/
+/.codex/
+/.agents/
+/.proposal-scores.json
+/AGENTS.md
+/CLAUDE.md
+/CLAUDE_CODE_TASK_PROMPT.md
 .idea/
 .vscode/
 *.suo
@@ -50,6 +114,33 @@ checkpoints/validation_accuracy.png
 *.sln
 *.sw?
 
-# OS
+# Generated files, environments and experiment trackers at any depth
+build/
+dist/
+/.package_install/
+__pycache__/
+*.py[cod]
+*.pyd
+*.egg-info/
+*.egg
+*.obj
+*.o
+*.so
+*.dll
+.Python
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage*
+htmlcov/
+wandb/
+mlruns/
+runs/
+lightning_logs/
+*.log
+*.db
+*.sqlite*
 .DS_Store
 Thumbs.db
