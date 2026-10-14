@@ -73,6 +73,7 @@
 /tests/*
 !/tests/test_package.py
 !/tests/test_publication_guard.py
+!/tests/test_baseline_waveform.py
 /tools/*
 !/tools/README.md
 !/tools/audit_repository.py

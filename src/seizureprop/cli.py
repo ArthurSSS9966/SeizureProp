@@ -18,6 +18,11 @@ def main() -> None:
     prediction = commands.add_parser('predict', help='Signal-only checkpoint inference')
     for name in ('checkpoint', 'features', 'output'):
         prediction.add_argument(f'--{name}', type=Path, required=True)
+    tissue = commands.add_parser('tissue-predict', help='Export one tissue label per bipolar channel')
+    for name in ('checkpoint', 'features', 'output'):
+        tissue.add_argument(f'--{name}', type=Path, required=True)
+    tissue.add_argument('--units', choices=['V', 'uV'], required=True)
+    tissue.add_argument('--segment-kind', choices=['baseline', 'ictal'], required=True)
     arguments = vars(parser.parse_args())
     command = arguments.pop('command')
     if command == 'run':
@@ -27,6 +32,9 @@ def main() -> None:
         from .data.manifest import prepare_legacy
         manifest = prepare_legacy(**arguments)
         print(json.dumps({'records': len(manifest['records']), 'endpoint_exclusions': manifest['endpoint_exclusions']}))
+    elif command == 'tissue-predict':
+        from .evaluation.tissue import predict_tissue
+        print(json.dumps(predict_tissue(**arguments), indent=2))
     else:
         import torch
         from .evaluation.predict import predict

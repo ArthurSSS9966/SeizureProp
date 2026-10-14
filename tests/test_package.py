@@ -161,5 +161,209 @@ class PackageContracts(unittest.TestCase):
                 run(path)
 
 
+class TissueMappingTests(unittest.TestCase):
+    """Synthetic identity and annotation contracts, without clinical data."""
+
+    def test_unknown_roi_does_not_become_grey(self) -> None:
+        from seizureprop.data.tissue import map_contacts
+        table = map_contacts([{'label': 'A1', 'roi': 'new-unrecognized-region'},
+                              {'label': 'A2', 'roi': 'ctx-lh-unknown'}])
+        self.assertTrue(all(item.tissue == 'UNKNOWN' for item in table.values()))
+
+    def test_freesurfer_name_number_validation(self) -> None:
+        from seizureprop.data.tissue import atlas_tissue
+        self.assertEqual(atlas_tissue('ctx-lh-insula', 1035), ('GM', ()))
+        self.assertEqual(atlas_tissue('Right-Hippocampus', 53), ('GM', ()))
+        self.assertEqual(atlas_tissue('Right-Amygdala', 54), ('GM', ()))
+        self.assertEqual(atlas_tissue('Right-Thalamus-Proper', 49), ('GM', ()))
+        self.assertEqual(atlas_tissue('Right-Cerebellum-Cortex', 47), ('GM', ()))
+        self.assertEqual(atlas_tissue('Left-Cerebral-White-Matter', 2), ('WM', ()))
+        for number in [2035, 1035.5, 'bad']:
+            self.assertEqual(atlas_tissue('ctx-lh-insula', number)[0], 'UNKNOWN')
+
+    def test_explicit_annotation_precedence_and_conflict(self) -> None:
+        from seizureprop.data.tissue import map_contacts
+        table = map_contacts([{'label': 'A1', 'matter': 'grey', 'brain_area': 'Left-Cerebral-White-Matter'},
+                              {'label': 'A2', 'matter': 'unknown', 'brain_area': 'ctx-lh-insula'},
+                              {'label': 'A3', 'matter': 'CSF', 'brain_area': 'ctx-lh-insula'}])
+        self.assertEqual(table[('A', 1)].tissue, 'GM')
+        self.assertIn('matter_atlas_conflict', table[('A', 1)].flags)
+        self.assertEqual(table[('A', 2)].tissue, 'UNKNOWN')
+        self.assertEqual(table[('A', 3)].tissue, 'UNKNOWN')
+
+    def test_identity_collisions_and_unparsed_contacts_rejected(self) -> None:
+        from seizureprop.data.tissue import contact_key, map_contacts
+        self.assertEqual(contact_key(' aB001 '), ('AB', 1))
+        self.assertEqual(contact_key('A2B03'), ('A2B', 3))
+        with self.assertRaises(ValueError):
+            map_contacts([{'label': 'AB01', 'matter': 'grey'}, {'label': 'ab1', 'matter': 'white'}])
+        with self.assertRaises(ValueError):
+            map_contacts([{'label': 'EEG A01-REF', 'matter': 'grey'}])
+
+    def test_pair_labels_require_two_known_matching_contacts(self) -> None:
+        from seizureprop.data.tissue import map_contacts, pair_tissue
+        table = map_contacts([{'label': f'A{i}', 'matter': matter}
+                              for i, matter in enumerate(['G', 'A', 'white', 'unknown'], 1)])
+        self.assertEqual(pair_tissue(table[('A', 1)], table[('A', 2)]), 1)
+        self.assertEqual(pair_tissue(table[('A', 3)], table[('A', 3)]), 0)
+        self.assertEqual(pair_tissue(table[('A', 1)], table[('A', 3)]), -1)
+        self.assertEqual(pair_tissue(table[('A', 1)], None), -1)
+        self.assertEqual(pair_tissue(table[('A', 4)], table[('A', 4)]), -1)
+
+
+class PairCompositionTests(unittest.TestCase):
+    def test_mixed_requires_two_known_tissues_without_conflict(self) -> None:
+        from seizureprop.data.tissue import pair_composition
+        self.assertEqual(pair_composition('GM', 'WM'), 2)
+        self.assertEqual(pair_composition('WM', 'GM'), 2)
+        self.assertEqual(pair_composition('GM', 'GM'), 1)
+        self.assertEqual(pair_composition('WM', 'WM'), 0)
+        for left, right in [('UNKNOWN', 'GM'), ('CSF', 'WM'), ('UNKNOWN', 'UNKNOWN')]:
+            self.assertEqual(pair_composition(left, right), -1)
+        for left, right in [('GM', 'WM'), ('GM', 'GM'), ('WM', 'WM')]:
+            self.assertEqual(pair_composition(left, right, conflicted=True), -1)
+
+    def test_three_class_model_rejects_unknown_and_survives_serialization(self) -> None:
+        import joblib
+        from seizureprop.models.tissue import PairTissueClassifier
+        rng = np.random.default_rng(85)
+        x = rng.normal(size=(90, 51))
+        y = np.tile([0, 1, 2], 30)
+        patients = np.repeat(['A', 'B', 'C'], 30)
+        x[:, 0] += y * 6
+        model = PairTissueClassifier().fit(x, y, patients)
+        scores = model.predict_proba(x)
+        np.testing.assert_allclose(scores.sum(axis=1), 1.)
+        np.testing.assert_allclose(model.predict(x), scores[:, 1])
+        self.assertGreater((scores.argmax(axis=1) == y).mean(), .9)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'pair-model.joblib'
+            joblib.dump(model, path)
+            np.testing.assert_array_equal(scores, joblib.load(path).predict_proba(x))
+        y[0] = -1
+        with self.assertRaisesRegex(ValueError, 'all tissue classes'):
+            PairTissueClassifier().fit(x, y, patients)
+
+    def test_three_class_patient_weighting_handles_absent_class(self) -> None:
+        from seizureprop.models.tissue import patient_class_weights
+        y = np.array([0, 1, 2, 2, 0, 1])
+        patients = np.array(['A'] * 4 + ['B'] * 2)
+        weights = patient_class_weights(patients, y)
+        self.assertAlmostEqual(weights[:4].sum(), weights[4:].sum())
+        for label in (0, 1, 2):
+            self.assertAlmostEqual(weights[(patients == 'A') & (y == label)].sum(), 1.)
+
+    def test_three_class_inference_separates_label_from_retention(self) -> None:
+        from seizureprop.evaluation.tissue import predict_tissue_arrays
+        from seizureprop.features.tissue import TISSUE_SCHEMA
+        from seizureprop.models.tissue import PairTissueClassifier
+        rng = np.random.default_rng(86)
+        model = PairTissueClassifier().fit(rng.normal(size=(90, 51)),
+            np.tile([0, 1, 2], 30), np.repeat(['A', 'B', 'C'], 30))
+        saved = {'model': model, 'schema': TISSUE_SCHEMA, 'units': 'uV',
+                 'state': 'baseline30', 'threshold': 0., 'classes': ('WM', 'GM', 'MIXED')}
+        values = rng.normal(size=(36, 8, 17))
+        names = np.array([f'A{i}-A{i + 1}' for i in range(1, 9)])
+        before = predict_tissue_arrays(saved, values, names, 'uV', 'baseline', 30)
+        self.assertTrue(before.retain.all())
+        p = before[['wm_score', 'gm_score', 'mixed_score']].to_numpy()
+        np.testing.assert_array_equal(before.channel_label, np.array(saved['classes'])[p.argmax(1)])
+        np.testing.assert_allclose(p.sum(1), 1.)
+        values[30:] = np.nan
+        after = predict_tissue_arrays(saved, values, names, 'uV', 'baseline', 30)
+        np.testing.assert_array_equal(before.gm_score, after.gm_score)
+        saved['classes'] = ('GM', 'WM', 'MIXED')
+        with self.assertRaisesRegex(ValueError, 'declare'):
+            predict_tissue_arrays(saved, values, names, 'uV', 'baseline', 30)
+
+
+class TissueStageTests(unittest.TestCase):
+    def test_physical_unit_conversion_matches_raw_waveforms(self) -> None:
+        from seizureprop.features.representations import extract_features
+        from seizureprop.features.tissue import aggregate_tissue, to_microvolts
+        rng = np.random.default_rng(23)
+        signal_v = rng.normal(0, 25e-6, (6 * 256, 4))
+        volts = extract_features(signal_v, 256)
+        microvolts = extract_features(signal_v * 1e6, 256)
+        converted = to_microvolts(volts, 'V')
+        np.testing.assert_allclose(converted, microvolts, atol=3e-6, rtol=1e-5)
+        np.testing.assert_allclose(aggregate_tissue(converted), aggregate_tissue(microvolts), atol=4e-6, rtol=1e-5)
+        self.assertFalse(np.shares_memory(converted, volts))
+
+    def test_clipped_features_require_raw_reconstruction(self) -> None:
+        from seizureprop.features.representations import extract_features
+        from seizureprop.features.tissue import to_microvolts
+        values = extract_features(np.zeros((512, 2)), 256)
+        with self.assertRaisesRegex(ValueError, 'Floor-clipped'):
+            to_microvolts(values, 'V')
+        with self.assertRaisesRegex(ValueError, 'Explicit'):
+            to_microvolts(values, 'unknown')
+
+    def test_patient_class_weighting_limits_channel_count_bias(self) -> None:
+        from seizureprop.models.tissue import patient_class_weights
+        patients = np.array(['A'] * 4 + ['B'] * 6)
+        target = np.array([0, 1, 1, 1, 0, 0, 0, 0, 0, 1])
+        weights = patient_class_weights(patients, target)
+        for patient in ('A', 'B'):
+            for label in (0, 1):
+                self.assertAlmostEqual(weights[(patients == patient) & (target == label)].sum(), len(target) / 4)
+
+    def test_cutoff_uses_macro_retention_and_preserves_ties(self) -> None:
+        from seizureprop.models.tissue import retention_threshold
+        p = np.array([.1] + [.9] * 99 + [.2, .2, .01])
+        y = np.array([1] * 102 + [0])
+        patients = np.array(['A'] * 100 + ['B'] * 3)
+        threshold = retention_threshold(p, y, patients, .95)
+        self.assertEqual(threshold, .2)
+        macro = np.mean([(p[(patients == patient) & (y == 1)] >= threshold).mean() for patient in ('A', 'B')])
+        self.assertGreaterEqual(macro, .95)
+
+    def test_standalone_prediction_survives_serialization(self) -> None:
+        import joblib
+        from seizureprop.models.tissue import TissueClassifier
+        rng = np.random.default_rng(44)
+        x = rng.normal(size=(30, 51))
+        y = np.tile([0, 1], 15)
+        model = TissueClassifier().fit(x, y, np.repeat(['A', 'B', 'C'], 10))
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'model.joblib'
+            joblib.dump(model, path)
+            np.testing.assert_array_equal(model.predict(x), joblib.load(path).predict(x))
+
+    def test_tissue_inference_ignores_future_ictal_frames(self) -> None:
+        from seizureprop.evaluation.tissue import predict_tissue_arrays
+        from seizureprop.features.tissue import TISSUE_SCHEMA
+        from seizureprop.models.tissue import TissueClassifier
+        rng = np.random.default_rng(52)
+        model = TissueClassifier().fit(rng.normal(size=(30, 51)), np.tile([0, 1], 15), np.repeat(['A', 'B', 'C'], 10))
+        saved = {'model': model, 'schema': TISSUE_SCHEMA, 'units': 'uV', 'state': 'baseline30', 'threshold': .2}
+        values = rng.normal(size=(40, 4, 17))
+        names = np.array(['A1-A2', 'A2-A3', 'B1-B2', 'B2-B3'])
+        before = predict_tissue_arrays(saved, values, names, 'uV', 'baseline', 30)
+        values[30:] = np.nan
+        after = predict_tissue_arrays(saved, values, names, 'uV', 'baseline', 30)
+        np.testing.assert_array_equal(before.gm_score, after.gm_score)
+        self.assertEqual(len(after), 4)
+        with self.assertRaisesRegex(ValueError, 'Segment kind'):
+            predict_tissue_arrays(saved, values, names, 'uV', 'ictal', 30)
+
+    def test_tissue_command_exports_without_clinical_arrays(self) -> None:
+        import joblib
+        from seizureprop.evaluation.tissue import predict_tissue
+        from seizureprop.features.tissue import TISSUE_SCHEMA
+        from seizureprop.models.tissue import TissueClassifier
+        rng = np.random.default_rng(53)
+        model = TissueClassifier().fit(rng.normal(size=(20, 51)), np.tile([0, 1], 10), np.repeat(['A', 'B'], 10))
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp)
+            joblib.dump({'model': model, 'schema': TISSUE_SCHEMA, 'units': 'uV', 'state': 'baseline6', 'threshold': .2}, path / 'model.joblib')
+            np.savez(path / 'signal.npz', absolute=rng.normal(size=(12, 3, 17)), names=['A1-A2', 'A2-A3', 'A3-A4'], units='uV')
+            result = predict_tissue(path / 'model.joblib', path / 'signal.npz', path / 'labels.csv', 'uV', 'baseline')
+            self.assertEqual(result['channels'], 3)
+            self.assertTrue((path / 'labels.csv').exists())
+            with self.assertRaisesRegex(ValueError, 'Preserve'):
+                predict_tissue(path / 'model.joblib', path / 'signal.npz', path / 'labels.csv', 'uV', 'baseline')
+
+
 if __name__ == '__main__':
     unittest.main()

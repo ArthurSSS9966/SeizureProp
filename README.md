@@ -60,6 +60,26 @@ provenance and hashes, and incomplete runs are rejected. Execution currently
 supports CPU and does not resume mid-epoch.
 
 Inference reads `absolute`, `relative` and `nbase`, not tissue or clinical labels.
+
+For a separate tissue-classification stage, export one reusable label per bipolar
+channel from non-seizure signal features:
+
+```powershell
+python -m seizureprop tissue-predict --checkpoint result/tissue_model/baseline30.joblib --features result/local_input/baseline.npz --units uV --segment-kind baseline --output result/local_prediction/tissue_labels.csv
+```
+
+This input needs `absolute` (time × channels × 17 signal features) and `names`.
+For a combined baseline/ictal cache, `nbase` restricts baseline inference to the
+pre-onset frames. Units are explicit; the command converts volts to microvolts
+when conversion is recoverable from the cached features. Load trusted project
+checkpoints only. Binary checkpoints export a GM score, GM/WM/UNCERTAIN label and
+retention decision. Experimental three-class checkpoints also export WM and
+mixed-pair scores, with the most likely class as the label. Their GM retention
+cutoff is a separate decision, so a predicted mixed pair can still be retained.
+Unknown anatomy is excluded from training rather than treated as mixed tissue.
+Scores are not guaranteed to be calibrated. Match channel identities before reusing
+labels for seizure localization. Ictal tissue inference requires an ictal-trained
+checkpoint and is retrospective.
 For current research inputs, channels are bipolar pairs. Output arrays retain
 input order but omit channel identities/timestamps; the caller must carry those
 metadata. Sigmoid scores are not calibrated confidence. Pooled involvement is
