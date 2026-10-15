@@ -365,5 +365,74 @@ class TissueStageTests(unittest.TestCase):
                 predict_tissue(path / 'model.joblib', path / 'signal.npz', path / 'labels.csv', 'uV', 'baseline')
 
 
+class IdentityPretrainingContracts(unittest.TestCase):
+    def test_disjoint_views_ignore_ictal_and_guard_frames(self) -> None:
+        from seizureprop.training.identity_pretraining import baseline_views
+        x = torch.arange(40.).reshape(1, 1, 40).repeat(4, 34, 1)
+        first, second = baseline_views(x, 30)
+        self.assertEqual(first[0, 0].tolist(), list(range(12)))
+        self.assertEqual(second[0, 0].tolist(), list(range(16, 28)))
+        changed = x.clone()
+        changed[:, :, 28:] = float('nan')
+        a, b = baseline_views(changed, 30)
+        torch.testing.assert_close(first, a)
+        torch.testing.assert_close(second, b)
+        with self.assertRaises(ValueError):
+            baseline_views(x, 20)
+
+    def test_collapsed_identity_is_penalized(self) -> None:
+        from seizureprop.training.identity_pretraining import consistency_terms
+        collapsed = torch.ones(8, 4)
+        terms = consistency_terms(collapsed, collapsed)
+        self.assertEqual(float(terms['invariance']), 0.)
+        self.assertGreater(float(terms['variance']), .9)
+        distributed = torch.tensor([[1.,1.,1.,1.], [1.,1.,-1.,-1.],
+                                    [1.,-1.,1.,-1.], [1.,-1.,-1.,1.],
+                                    [-1.,1.,1.,-1.], [-1.,1.,-1.,1.],
+                                    [-1.,-1.,1.,1.], [-1.,-1.,-1.,-1.]])
+        self.assertLess(float(consistency_terms(distributed, distributed)['consistency']),
+                        float(terms['consistency']))
+
+    def test_unknown_tissue_has_zero_gradient(self) -> None:
+        from seizureprop.training.identity_pretraining import tissue_objective
+        logits = torch.tensor([.2, -.1, 100.], requires_grad=True)
+        labels = torch.tensor([1, 0, -1])
+        loss = tissue_objective(logits, labels)
+        loss.backward()
+        self.assertEqual(float(logits.grad[2]), 0.)
+        self.assertNotEqual(float(logits.grad[0]), 0.)
+        with self.assertRaises(ValueError):
+            tissue_objective(logits, torch.tensor([1, 0, 2]))
+
+    def test_consistency_has_no_label_dependency(self) -> None:
+        from seizureprop.training.identity_pretraining import identity_objective
+        model = build_model('channel_identity', 34, 8).eval()
+        head = torch.nn.Linear(8, 1)
+        record = {'first': torch.randn(6, 34, 12), 'second': torch.randn(6, 34, 12)}
+        before, _ = identity_objective(model, head, record, 1., 0.)
+        record['tissue'] = torch.full((6,), float('nan'))
+        after, _ = identity_objective(model, head, record, 1., 0.)
+        torch.testing.assert_close(before, after)
+
+    def test_pretraining_changes_only_identity_and_preserves_rng(self) -> None:
+        from seizureprop.training.identity_pretraining import pretrain_identity
+        torch.manual_seed(8)
+        model = build_model('channel_identity', 34, 8)
+        before = {k: v.clone() for k, v in model.state_dict().items()}
+        record = {'patient': 'synthetic-train', 'first': torch.randn(8, 34, 12),
+                  'second': torch.randn(8, 34, 12), 'tissue': torch.tensor([0,1,-1,0,1,-1,0,1])}
+        valid = {**record, 'patient': 'synthetic-validation'}
+        rng = torch.get_rng_state().clone()
+        state, _, _, _ = pretrain_identity(model, [record], [valid], 17, epochs=2, tissue_weight=1.)
+        torch.testing.assert_close(rng, torch.get_rng_state())
+        for key, value in before.items():
+            if not key.startswith(('id_frames.', 'id_pool.')):
+                torch.testing.assert_close(value, state[key], rtol=0, atol=0)
+        self.assertTrue(any(not torch.equal(value, state[key]) for key, value in before.items()
+                            if key.startswith(('id_frames.', 'id_pool.'))))
+        with self.assertRaisesRegex(ValueError, 'overlap'):
+            pretrain_identity(model, [record], [record], 17, epochs=1)
+
+
 if __name__ == '__main__':
     unittest.main()

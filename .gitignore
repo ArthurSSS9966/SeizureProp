@@ -76,6 +76,7 @@
 !/tests/test_publication_guard.py
 !/tests/test_baseline_waveform.py
 !/tests/test_channel_identity.py
+!/tests/test_cascade.py
 !/tests/test_joint_contrastive.py
 !/tests/test_staged_tissue.py
 /tools/*

@@ -42,7 +42,7 @@ class ExperimentConfig:
             values['initializations'] = {str(k): str((path.parent / v).resolve()) for k, v in values['initializations'].items()}
         values['seeds'] = tuple(values.get('seeds', (17, 29, 43)))
         config = cls(**values)
-        if config.model not in {'combined', 'context'} or config.selection not in {'onset', 'joint'}:
+        if config.model not in {'combined', 'context', 'channel_attention', 'channel_identity'} or config.selection not in {'onset', 'joint'}:
             raise ValueError('Unknown model or selection endpoint')
         if config.sampling not in {'patient_uniform', 'recordings'}:
             raise ValueError('Unknown sampling protocol')

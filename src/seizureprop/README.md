@@ -74,12 +74,38 @@ For bipolar channel `A1-A2`, a score belongs to the pair. Do not assign it to A1
 or A2 as a separately validated contact prediction. Optional 3D views should
 represent the pair explicitly and document any display-only midpoint convention.
 
+## Experimental channel attention
+
+The model registry also supports `channel_attention` and `channel_identity`.
+Both use causal temporal convolutions and an eight-latent population attention
+bottleneck with per-channel outputs. Their `hidden` width must be divisible by
+four. `channel_identity` derives a channel embedding from baseline frames
+`0:nbase-2`; it requires at least three baseline frames and one ictal frame.
+It does not consume channel names, coordinates or tissue labels. Baseline outputs
+use retrospective calibration; ictal outputs are causal at feature-frame
+resolution, subject to the input preprocessing's own temporal support.
+
+The calibration mechanism is inspired by
+[SPINT](https://arxiv.org/abs/2507.08402), with a channel-equivariant localization
+head rather than a population-level behavioral decoder. This is a small research
+architecture, not a reproduction or a pretrained foundation model. Existing
+checkpoints are not converted to this architecture automatically.
+
+`training.masked.pretrain` supports masked reconstruction of absolute signal
+features using disjoint baseline calibration. Supply only training patients for
+gradient updates and separate validation patients for epoch selection; keep test
+patients out of both. Fit preprocessing on training data and record its provenance.
+Clinical onset/spread fine-tuning remains a separate step. The private experiment
+driver pins cohort inputs, configurations, source hashes and per-seed outputs.
+These models use the same prediction interface above; their experimental status
+does not change the app's current boundaries.
+
 ## Boundaries
 
 - Import reusable code from `seizureprop`, not notebooks or `scripts.*`.
 - Historical waveform models are local-only and excluded from public packages.
-- Activity/tissue heads exist in the backbone but are not exported by this
-  predictor. Their existence does not establish a validated detector/tissue model.
+- Activity/tissue heads in the combined/context backbones are not exported by
+  this predictor. Their existence does not establish a validated detector/tissue model.
 - No continuous detector, recruitment estimator, directed propagation network,
   imaging registration, GUI or calibrated confidence API is currently provided.
 - The intended app starts with EDF files manually transferred from Natus to a

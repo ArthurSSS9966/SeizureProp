@@ -2,6 +2,7 @@
 import torch
 from torch import Tensor, nn
 from .combined import CombinedScorer
+from .channel_identity import ChannelAttentionScorer, ChannelIdentityScorer
 
 
 class ContextScorer(CombinedScorer):
@@ -25,7 +26,9 @@ class ContextScorer(CombinedScorer):
 
 
 def build_model(name: str, features: int, hidden: int) -> nn.Module:
-    registry = {'combined': CombinedScorer, 'context': ContextScorer}
+    registry = {'combined': CombinedScorer, 'context': ContextScorer,
+                'channel_attention': ChannelAttentionScorer,
+                'channel_identity': ChannelIdentityScorer}
     if name not in registry:
         raise ValueError(f'Unknown model: {name}')
     return registry[name](features, hidden)
