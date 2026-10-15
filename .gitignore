@@ -68,12 +68,16 @@
 /scripts/*
 !/scripts/README.md
 !/scripts/seeg_external_predict.py
+!/scripts/verify_delivery.py
 /src/seizureprop/legacy/*
 !/src/seizureprop/legacy/README.md
 /tests/*
 !/tests/test_package.py
 !/tests/test_publication_guard.py
 !/tests/test_baseline_waveform.py
+!/tests/test_channel_identity.py
+!/tests/test_joint_contrastive.py
+!/tests/test_staged_tissue.py
 /tools/*
 !/tools/README.md
 !/tools/audit_repository.py

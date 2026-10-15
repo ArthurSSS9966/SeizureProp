@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "adapter": "python",
+  "executable": "C:/Users/arthu/anaconda3/envs/SWAPVAE/python.exe",
+  "commands": [
+    {
+      "label": "Public synthetic package regression suite",
+      "scope": "Public synthetic package tests in the complete current delivered source tree. Excludes private patient data, checkpoints, private experiment drivers and retraining; original research evidence remains on each task.",
+      "argv": [
+        "scripts/verify_delivery.py"
+      ],
+      "timeoutSeconds": 180
+    }
+  ]
+}
